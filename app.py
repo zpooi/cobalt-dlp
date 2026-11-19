@@ -183,6 +183,75 @@ APPLE_BAD_H264_PROFILES = (
 APPLE_MAX_H264_LEVEL = 52  # 5.2，覆盖到 4K60；再高 iPhone 解不了
 
 
+EXTRACTOR_NAMES = {
+    "douyin": "抖音", "tiktok": "TikTok",
+    "xiaohongshu": "小红书", "xhs": "小红书",
+    "bilibili": "B站", "bilibilibangumi": "B站",
+    "youtube": "YouTube", "instagram": "Instagram",
+    "twitter": "X（推特）", "weibo": "微博",
+    "facebook": "Facebook", "reddit": "Reddit",
+}
+
+
+def explain_failure(lines, returncode):
+    """把 yt-dlp 的报错尾巴翻译成一句能照着做的中文。
+
+    直接展示 "yt-dlp exited with 1" 对用户没有任何帮助；这里按错误特征
+    归类，原始输出仍保存在 job["log"] 里供展开查看。
+    """
+    raw = ""
+    for line in reversed(lines):
+        if line.startswith("ERROR:"):
+            raw = line[len("ERROR:"):].strip()
+            break
+    if not raw:
+        raw = next((l.strip() for l in reversed(lines) if l.strip()), "")
+
+    extractor = ""
+    m = re.match(r"^\[([^\]]+)\]\s*(.*)$", raw)
+    if m:
+        extractor = m.group(1)
+        rest = re.sub(r"^[^:]{1,40}:\s*", "", m.group(2), count=1)
+        raw_short = rest or m.group(2)
+    else:
+        raw_short = raw
+    low = raw.lower()
+    site = EXTRACTOR_NAMES.get(extractor.lower(), extractor)
+    who = site or "该站点"
+    if site and not re.search(r"[一-鿿]", site):
+        who = site + " "
+
+    if "fresh cookies" in low or "not necessarily logged in" in low:
+        return (f"{who}要求 cookies（未登录状态的也行）。"
+                "把从浏览器导出的 cookies 放进服务器 cookies/cookies.txt 后重新点下载即可，无需重启。")
+    if ("sign in" in low or "login" in low or "log in" in low
+            or "cookies" in low or "authenticat" in low):
+        return (f"{who}需要登录信息：请在 cookies/cookies.txt 里配置该站 cookies 后重试。")
+    if "private" in low:
+        return "内容是私密的，需要作者授权或配置 cookies。"
+    if "unsupported url" in low:
+        return "yt-dlp 不支持这个链接，换一个视频页面的链接试试。"
+    if "requested content is not available" in low or "media not found" in low:
+        return "在" + who.rstrip() + "上找不到这段内容：可能是私密/已删除，或需要配置 cookies 登录后再试。"
+    if ("unavailable" in low or "not available" in low or "removed" in low
+            or "not exist" in low or "not found" in low):
+        return "视频不存在，或已被删除 / 设为不可见。"
+    if "403" in low:
+        return f"{who}拒绝了请求（HTTP 403），通常需要 cookies 或更换服务器出口网络。"
+    if "404" in low:
+        return "链接失效（HTTP 404）。"
+    if "unable to extract" in low:
+        return "解析失败：站点可能改版，先更新 yt-dlp（docker compose exec savebox pip install -U yt-dlp）再试。"
+    if "country" in low or "region" in low or "geo-restrict" in low:
+        return "该内容有地区限制，服务器所在地区无法访问。"
+    if ("timed out" in low or "timeout" in low or "name or service" in low
+            or "connection" in low or "network" in low or "temporary failure" in low):
+        return "网络连接失败或超时，稍后重试；持续失败可能是服务器网络问题。"
+    if raw_short:
+        return f"下载失败：{raw_short}"
+    return f"下载失败（yt-dlp 退出码 {returncode}）。"
+
+
 def _job_note(job, line):
     """Log a human-readable note both to stdout and to the job record."""
     print(f"[cobalt-dlp] {line}")
@@ -429,9 +498,10 @@ def run_job(job_id):
         return
 
     if proc.returncode != 0:
+        msg = explain_failure(tail, proc.returncode)
         with JOBS_LOCK:
             job["status"] = "error"
-            job["error"] = "yt-dlp exited with %s" % proc.returncode
+            job["error"] = msg
             job["log"] = "\n".join(tail)
             job["finished"] = now_ms()
             job["updated"] = now_ms()
@@ -457,9 +527,10 @@ def run_job(job_id):
                           "rel": job_id + "/" + name})
 
     if not files:
+        msg = "没有产出文件：yt-dlp 没有报错但没有下载到内容，链接可能不是视频页面。"
         with JOBS_LOCK:
             job["status"] = "error"
-            job["error"] = "no output file produced"
+            job["error"] = msg
             job["log"] = "\n".join(tail)
             job["finished"] = now_ms()
             job["updated"] = now_ms()
@@ -545,9 +616,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_index()
         if path == "/api/health":
             ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+            cookies_ok = os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0
             return self._send_json({"ok": True, "yt_dlp": yt_dlp_version(),
                                     "engine": " ".join(YTDLP),
                                     "ffmpeg": ffmpeg_ok,
+                                    "cookies": cookies_ok,
                                     "mobile_safe": MOBILE_SAFE,
                                     "retention_hours": RETENTION_HOURS})
         if path == "/api/jobs":

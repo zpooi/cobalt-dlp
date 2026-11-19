@@ -85,7 +85,7 @@ cobalt-dlp/
 | 虎牙 / 斗鱼 直播与回放 | ✅ 直接可用 |
 | 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ yt-dlp 暂不支持 |
 
-**关于 cookies**：`cookies.txt` 是 Netscape 格式，一个文件里可以**同时放多个站**的 cookies（直接拼接即可，yt-dlp 会按域名取用）。抖音建议用浏览器登录后导出，见上一节。
+**关于 cookies**：`cookies.txt` 是 Netscape 格式，一个文件里可以**同时放多个站**的 cookies（直接拼接即可，yt-dlp 会按域名取用）。抖音建议用浏览器登录后导出，见上一节。cookies 文件是**每次任务开始前读取**的，替换后直接重新点下载即可，不用重启容器。
 
 **服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严，这类站点如果报错，先确认 cookies 已配置；B站绝大多数视频海外可下，个别番剧有地区限制。
 
@@ -122,7 +122,8 @@ iPhone 只认 **H.264(8-bit 4:2:0) + AAC-LC** 的 mp4。很多站点（YouTube�
 ## 常见问题
 - **手机提示"该格式的视频无法保存" / 网页/手机播放黑屏 / 只有声音**：见上一节。**旧文件不会自动重转，请重新下载一次。**
 - **下载到手机后文件名变成 `.mp4` 或者没有后缀、无法识别**：已修复。现在下载名一定会保留正确后缀（纯中文标题会退化为 `video.mp4`，同时仍通过 `filename*` 显示原中文名）。
-- **下载失败 "login required" / "rate-limit"**：配置 cookies（见上）。
+- **失败原因看不明白**：失败卡片现在会直接给中文原因（例如"抖音要求 cookies…"），点下面的「yt-dlp 输出」可以展开原始日志。
+- **下载失败 "login required" / "rate-limit" / "Fresh cookies … are needed"**：配置 cookies（见上）。抖音的这条报错几乎都是缺 cookies。
 - **下载失败 "unable to extract"**：目标站改版或链接非公开，先更新 yt-dlp：`docker compose exec savebox pip install -U yt-dlp` 后 `docker compose restart`。
 - **清晰度没有 1080p**：源本身最高就那么多；选"最佳画质"即可。
 - **文件太大/带宽**：下载存服务器磁盘，注意磁盘空间（`downloads/` 可定期清理）。
