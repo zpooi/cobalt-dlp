@@ -27,6 +27,7 @@ mkdir -p cookies
 
 # 3. 启动
 docker compose up -d --build
+# 会启动两个容器：savebox（主程序）+ bgutil-provider（YouTube PO Token）
 
 # 4. 查看
 docker compose logs -f
@@ -43,6 +44,10 @@ sudo apt update && sudo apt install -y ffmpeg python3-venv
 ./run.sh
 # 浏览器打开 http://服务器IP:13000
 ```
+
+> 不用 Docker 时没有 `bgutil-provider`，YouTube 在机房 IP 上可能只能拿到受限格式。需要的话手动起一个：
+> `docker run -d --name bgutil-provider -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider`，
+> 然后 `POT_PROVIDER_URL=http://127.0.0.1:4416 ./run.sh`。
 
 ## 如何导出 cookies（支持登录 / 避免限流）
 
@@ -86,7 +91,7 @@ cobalt-dlp/
 | 虎牙（直播/回放） | ✅ 可用 | 不需要 |
 | 小红书（含 `xhslink.com` 短链） | ⚠️ 仅视频笔记 | **必须**：不配 cookies 会被登录墙拦下；图文笔记不支持 |
 | 西瓜视频 | ⚠️ 需要 cookies | 未登录时提取器直接要求 cookies |
-| YouTube | ✅ 可用 | 家宽 IP 一般不需要；**机房 IP 基本必须**（程序会先强制 IPv4 + 轮换 8 种客户端，仍被判定"机器人"就只能配 cookies） |
+| YouTube | ✅ 可用 | 家宽 IP 一般不需要；**机房 IP 基本必须**（自动：强制 IPv4 + 轮换 8 种客户端 + Deno + PO Token；仍被拦就只能配登录 cookies） |
 | Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies |
 | SoundCloud / Pinterest | ✅ 可用 | 不需要 |
 | Facebook / Reddit / Vimeo 等 | ✅ yt-dlp 支持的都行 | 视内容 |
@@ -105,6 +110,7 @@ cobalt-dlp/
 - **小红书 / 微博**：没配 cookies 时自动去要首页下发的访客 cookie（`a1`/`SUB` 这类关键 cookie 登录才有）
 - **YouTube 机器人校验**：先强制走 IPv4（GCP 等 VPS 的 IPv6 段常被 YouTube 整段降权），再依次尝试默认 → `visionos` → `android_vr` → `tv_downgraded` → `web_embedded` → `mweb` → `tv` → `web_safari` 客户端，全失败才报错
 - **YouTube JS 挑战**：镜像内置 Deno（yt-dlp 2026 需要的 JS 运行时），用来解 nsig、少踩"格式缺失/机器人"
+- **YouTube PO Token**：docker-compose 自带 `bgutil-provider` 服务，Web 客户端需要 PO Token 时自动生成，避免"只返回受限格式"
 - **X（Twitter）限流**：GraphQL 接口被限流/拒绝时自动切到 syndication 接口再试
 - **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
 - **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试
@@ -114,7 +120,7 @@ cobalt-dlp/
 
 **抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
 
-**机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战），仍然被拦时**唯一稳定的办法是配 cookies**：
+**机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战、通过 `bgutil-provider` 生成 PO Token），仍然被拦时**唯一稳定的办法是配 cookies**：
 
 1. 浏览器登录 YouTube（建议用专门的小号，避免主号被风控）；
 2. 用扩展导出 youtube.com 的 cookies（Netscape 格式），保存为 `cookies/youtube.txt`；

@@ -115,17 +115,56 @@ def _probe_once(url, cookies, fmt, extra):
 
 
 def run_probe(url, cookies):
-    """和正式下载用同一套策略（YouTube 客户端切换、画质兜底）。"""
+    """和正式下载用同一套策略（YouTube 客户端切换、画质兜底）。
+
+    返回 (ok, 最后一条说明, 每次尝试的 (策略, 结果))，失败时把每一轮的原因
+    都打印出来，方便判断是"所有客户端都被拦"还是"某个客户端拿到了格式"。
+    """
     job = {"url": url, "quality": "best"}
     last = ""
-    for _, fmt, extra in app.yt_dlp_attempts(job):
+    tried = []
+    for label, fmt, extra in app.yt_dlp_attempts(job):
         ok, info = _probe_once(url, cookies, fmt, extra)
+        tried.append((label, info))
         if ok:
-            return True, info
+            return True, info, tried
         last = info
         if not any(k in info.lower() for k in app._RETRYABLE):
             break
-    return False, last
+    return False, last, tried
+
+
+def youtube_cookie_state():
+    """判断合并后的 cookies 里是否有 YouTube 的登录态（只看名字，不外泄值）。"""
+    try:
+        path = app.merged_cookies_path()
+    except Exception:  # noqa
+        return "无"
+    if not path:
+        return "无"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return "无"
+    names = set()
+    for line in text.splitlines():
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#") or not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            names.add(parts[5])
+    if not names:
+        return "无"
+    logged = names & {"SID", "HSID", "SSID", "APISID", "SAPISID",
+                      "LOGIN_INFO", "__Secure-1PSID", "__Secure-3PSID"}
+    if "LOGIN_INFO" in names or "SID" in names:
+        return f"已登录（{len(names)} 个，含 SID/LOGIN_INFO）"
+    if logged:
+        return f"疑似已登录（有 {len(logged)} 个登录 cookie，但缺 SID/LOGIN_INFO）"
+    return f"未登录（{len(names)} 个 cookie，没有 SID/LOGIN_INFO）"
 
 
 def probe_douyin():
@@ -147,13 +186,18 @@ def main(argv):
     cookies = prepare_cookies(workdir)
     import yt_dlp.version as ytv
     print(f"环境：yt-dlp {ytv.__version__} | JS 运行时：{'deno' if shutil.which('deno') else '无'}"
-          f" | curl_cffi：{'有' if _has_curl_cffi() else '无'}")
+          f" | curl_cffi：{'有' if _has_curl_cffi() else '无'}"
+          f" | YouTube cookies：{youtube_cookie_state()}")
+    pot = os.environ.get("POT_PROVIDER_URL")
+    if pot:
+        print(f"PO Token provider：{pot}")
     rows = []
     print("平台            结果   说明")
     print("-" * 78)
     for name, keys in PLATFORMS:
         if only and name.lower() not in only and not any(k.lower() in only for k in keys):
             continue
+        tried = []
         if name == "抖音":
             ok, info = probe_douyin()
         else:
@@ -167,12 +211,15 @@ def main(argv):
                 else:
                     ok, info = False, "没有可用的测试链接"
                     for url in urls:
-                        ok, info = run_probe(url, cookies)
+                        ok, info, tried = run_probe(url, cookies)
                         if ok:
                             break
         rows.append((name, ok, info))
         mark = "✅ 可用" if ok else ("❌ 失败" if ok is False else "⚠️ 跳过")
         print(f"{name:<14} {mark:<6} {info}")
+        if ok is False and tried:
+            for label, msg in tried:
+                print(f"    · {label}: {msg[:100]}")
     ok_n = sum(1 for _, ok, _ in rows if ok)
     bad_n = sum(1 for _, ok, _ in rows if ok is False)
     print("-" * 78)
