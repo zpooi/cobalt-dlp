@@ -19,6 +19,7 @@ Files are kept for RETENTION_HOURS (default 24) and then auto-deleted
 by a background janitor thread, so they never pile up on the server.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -28,11 +29,13 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote, unquote_plus
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.join(HERE, "downloads"))
@@ -517,6 +520,239 @@ def ensure_apple_playable(video_path, job=None):
     return video_path
 
 
+def _job_failed(job, message, log_lines=None):
+    with JOBS_LOCK:
+        job["status"] = "error"
+        job["error"] = message
+        job["log"] = "\n".join(log_lines or [])
+        job["finished"] = now_ms()
+        job["updated"] = now_ms()
+
+
+# ---------------------------------------------------------------- 抖音
+# yt-dlp 的 Douyin 提取器只请求 aweme/detail 而且不带签名，抖音的 Argus 网关
+# 一律 403（"Uifid Not Found" / "Signature Not Found"），换任何 cookies 都不行。
+# 这里自己按 x-secsdk-web-signature 的算法签名（uifid + timestamp + 固定盐值），
+# 请求头再带上 uifid，才能拿到 aweme_detail；cookies 里必须有 UIFID。
+DOUYIN_HOST_RE = re.compile(r"https?://(?:[a-z0-9-]+\.)*douyin\.com/", re.I)
+DOUYIN_ID_RE = re.compile(r"/(?:video|share/video)/(\d{10,25})")
+DOUYIN_SECSALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
+UA_DESKTOP = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+class DouyinError(Exception):
+    """抖音专用下载路径的失败原因（已经是给用户看的中文）。"""
+
+
+def douyin_video_id(url):
+    """从视频页或 v.douyin.com 短链里取出 aweme_id（取不到返回 ""）。"""
+    m = DOUYIN_ID_RE.search(url or "")
+    if m:
+        return m.group(1)
+    m = re.match(r"https?://v\.douyin\.com/[A-Za-z0-9_-]+", url or "", re.I)
+    if not m:
+        return ""
+    try:
+        req = urllib.request.Request(m.group(0), headers={"User-Agent": UA_DESKTOP})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            final = r.geturl()
+    except Exception:
+        return ""
+    m = DOUYIN_ID_RE.search(final)
+    return m.group(1) if m else ""
+
+
+def _douyin_cookies(path):
+    """从合并后的 cookies 文件里取 douyin 的 Cookie 头和 UIFID。"""
+    if not path or not os.path.isfile(path):
+        return "", ""
+    pairs, uifid = [], ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                s = line.rstrip("\n")
+                if s.startswith("#HttpOnly_"):
+                    s = s[len("#HttpOnly_"):]
+                elif s.startswith("#") or not s.strip():
+                    continue
+                parts = s.split("\t")
+                if len(parts) != 7:
+                    continue
+                domain, name, value = parts[0].lower(), parts[5], parts[6]
+                if "douyin.com" not in domain or not name:
+                    continue
+                pairs.append(f"{name}={value}")
+                if name.upper() == "UIFID" and not uifid:
+                    uifid = value
+    except OSError:
+        return "", ""
+    return "; ".join(pairs), uifid
+
+
+def douyin_sign(url, uifid, ts=None):
+    """规范化 query 并算出 x-secsdk-web-signature（纯计算，无需 JS）。"""
+    ts = ts or int(time.time())
+    base, _, query = url.partition("?")
+    safe = "!*'()"
+    parts = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+        else:
+            k, v = pair, ""
+        k = unquote_plus(k)
+        v = unquote_plus(v)
+        parts.append(f"{k}={quote(v, safe=safe)}")
+    canon = "&".join(parts)
+    names = [p.split("=", 1)[0] for p in canon.split("&") if p]
+    if "uifid" not in names:
+        canon = (canon + "&" if canon else "") + "uifid=" + quote(uifid, safe=safe)
+    signed = f"{canon}&timestamp={ts}"
+    plain = f"{uifid}_{ts}_{DOUYIN_SECSALT}_{signed}"
+    sig = hashlib.md5(plain.encode("utf-8")).hexdigest()
+    return f"{base}?{signed}&x-secsdk-web-signature={sig}"
+
+
+def douyin_fetch_detail(video_id, cookies_path):
+    cookie_header, uifid = _douyin_cookies(cookies_path)
+    if not uifid:
+        raise DouyinError(
+            "抖音需要 cookies：把浏览器导出的 douyin cookies（里面要有 UIFID）"
+            "放进 cookies/ 目录后重试。")
+    url = douyin_sign(
+        f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={video_id}", uifid)
+    headers = {
+        "User-Agent": UA_DESKTOP,
+        "Referer": "https://www.douyin.com/",
+        "uifid": uifid,
+        "Accept": "application/json",
+        "Cookie": cookie_header,
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read(200).decode("utf-8", "replace")
+        except Exception:  # noqa
+            detail = ""
+        if "Uifid" in detail:
+            raise DouyinError(
+                "抖音风控拦截（Uifid Not Found）：cookies 里没有有效的 UIFID，"
+                "重新导出 cookies 再试。")
+        if "Signature" in detail:
+            raise DouyinError(
+                "抖音风控拦截（Signature Not Found）：cookies 可能已过期，"
+                "重新导出 cookies 再试。")
+        raise DouyinError(f"抖音接口返回 HTTP {e.code}：{detail[:120] or '无内容'}")
+    except Exception as e:  # noqa
+        raise DouyinError(f"请求抖音接口失败：{e}")
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        raise DouyinError("抖音接口返回的不是 JSON，可能被风控了，稍后重试。")
+    detail = data.get("aweme_detail")
+    if not detail:
+        raise DouyinError("抖音没有返回这个视频：可能已删除 / 私密，或 cookies 过期。")
+    return detail
+
+
+def douyin_pick_url(detail):
+    """优先 H.264（iPhone 直接能放，省一次转码）。"""
+    video = detail.get("video") or {}
+    for key in ("play_addr_h264", "play_addr"):
+        urls = (video.get(key) or {}).get("url_list") or []
+        if urls:
+            return urls[0]
+    best, best_br = "", -1
+    for item in video.get("bit_rate") or []:
+        urls = (item.get("play_addr") or {}).get("url_list") or []
+        br = item.get("bit_rate") or 0
+        if urls and br > best_br:
+            best, best_br = urls[0], br
+    return best
+
+
+def douyin_filename(detail):
+    desc = (detail.get("desc") or "").strip() or str(detail.get("aweme_id") or "douyin")
+    desc = re.sub(r"[\r\n\t]+", " ", desc)
+    desc = re.sub(r'[\\/:*?"<>|]+', " ", desc)
+    desc = re.sub(r"\s{2,}", " ", desc).strip(" .")[:80].strip(" .")
+    return (desc or "douyin") + ".mp4"
+
+
+def _http_to_file(url, dest, job, headers):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as fh:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+            done += len(chunk)
+            if total and job is not None:
+                with JOBS_LOCK:
+                    job["progress"] = min(99.0, round(done * 100.0 / total, 1))
+
+
+def douyin_to_mp3(video_path, job):
+    out = os.path.splitext(video_path)[0] + ".mp3"
+    if not FFMPEG:
+        raise DouyinError("未安装 ffmpeg，无法提取音频。")
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-i", video_path, "-vn", "-c:a", "libmp3lame", "-q:a", "0", out],
+            capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        raise DouyinError("提取音频超时。")
+    if r.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
+        err = (r.stderr or "").strip().splitlines()
+        raise DouyinError("提取音频失败：" + (err[-1] if err else f"ffmpeg exit {r.returncode}"))
+    try:
+        os.remove(video_path)
+    except OSError:
+        pass
+    return out
+
+
+def douyin_download(job, job_dir, video_id):
+    """下载抖音视频/音频，返回产出的文件路径。"""
+    try:
+        cookies = merged_cookies_path()
+    except Exception as e:  # noqa
+        cookies = None
+        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+    detail = douyin_fetch_detail(video_id, cookies)
+    url = douyin_pick_url(detail)
+    if not url:
+        if detail.get("images"):
+            raise DouyinError("这是图文作品，暂不支持下载。")
+        raise DouyinError("没解析到视频地址，可能视频已删除或受限。")
+    dest = os.path.join(job_dir, douyin_filename(detail))
+    with JOBS_LOCK:
+        job["phase"] = "downloading"
+        job["progress"] = 0.0
+    try:
+        _http_to_file(url, dest, job,
+                      {"User-Agent": UA_DESKTOP, "Referer": "https://www.douyin.com/"})
+    except Exception as e:  # noqa
+        raise DouyinError(f"下载抖音视频失败：{e}")
+    if not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+        raise DouyinError("抖音 CDN 没有返回视频数据（链接可能已过期），重试一次。")
+    if job.get("quality") == "audio":
+        with JOBS_LOCK:
+            job["phase"] = "merging"
+        dest = douyin_to_mp3(dest, job)
+    return dest
+
+
 def run_job(job_id):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -526,72 +762,73 @@ def run_job(job_id):
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    fmt = QUALITY_FMT.get(job.get("quality", "best"), QUALITY_FMT["best"])
-    outtmpl = os.path.join(job_dir, "%(title).80s.%(ext)s")
-
-    cmd = YTDLP + [
-        "-f", fmt,
-        "--no-playlist",
-        "--no-overwrites",
-        "--restrict-filenames",
-        "--newline",
-        "--no-color",
-        "-o", outtmpl,
-    ]
-    # 视频统一成 mp4；H.264 兼容性由下载后的 ensure_apple_playable() 兜底转码保证。
-    if job.get("quality") == "audio":
-        cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
-    else:
-        cmd += ["--merge-output-format", "mp4"]
-    try:
-        cookies = merged_cookies_path()
-    except Exception as e:  # noqa
-        cookies = None
-        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
-    if cookies:
-        cmd += ["--cookies", cookies]
-    cmd += [job["url"]]
-
     with JOBS_LOCK:
         job["status"] = "running"
         job["updated"] = now_ms()
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
     tail = []
-    try:
-        for line in proc.stdout:  # type: ignore
-            line = line.rstrip("\n")
-            tail.append(line)
-            if len(tail) > 40:
-                tail.pop(0)
-            m = re.search(r"\[download\]\s+([\d.]+)%", line)
-            if m:
-                with JOBS_LOCK:
-                    job["progress"] = float(m.group(1))
-            # merge/extract stage
-            if "Merging formats" in line or "Extracting audio" in line:
-                with JOBS_LOCK:
-                    job["phase"] = "merging"
-        proc.wait()
-    except Exception as e:  # noqa
-        with JOBS_LOCK:
-            job["status"] = "error"
-            job["error"] = str(e)
-            job["log"] = "\n".join(tail)
-            job["finished"] = now_ms()
-            job["updated"] = now_ms()
-        return
+    douyin_id = douyin_video_id(job["url"]) if DOUYIN_HOST_RE.match(job["url"]) else ""
+    if douyin_id:
+        # 抖音走自带下载器：yt-dlp 现在拿不到签名，必然 403
+        try:
+            douyin_download(job, job_dir, douyin_id)
+        except DouyinError as e:
+            _job_failed(job, str(e), tail)
+            return
+        except Exception as e:  # noqa
+            _job_failed(job, f"抖音下载出错：{e}", tail)
+            return
+    else:
+        fmt = QUALITY_FMT.get(job.get("quality", "best"), QUALITY_FMT["best"])
+        outtmpl = os.path.join(job_dir, "%(title).80s.%(ext)s")
 
-    if proc.returncode != 0:
-        msg = explain_failure(tail, proc.returncode)
-        with JOBS_LOCK:
-            job["status"] = "error"
-            job["error"] = msg
-            job["log"] = "\n".join(tail)
-            job["finished"] = now_ms()
-            job["updated"] = now_ms()
-        return
+        cmd = YTDLP + [
+            "-f", fmt,
+            "--no-playlist",
+            "--no-overwrites",
+            "--restrict-filenames",
+            "--newline",
+            "--no-color",
+            "-o", outtmpl,
+        ]
+        # 视频统一成 mp4；H.264 兼容性由下载后的 ensure_apple_playable() 兜底转码保证。
+        if job.get("quality") == "audio":
+            cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
+        else:
+            cmd += ["--merge-output-format", "mp4"]
+        try:
+            cookies = merged_cookies_path()
+        except Exception as e:  # noqa
+            cookies = None
+            _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+        if cookies:
+            cmd += ["--cookies", cookies]
+        cmd += [job["url"]]
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+        try:
+            for line in proc.stdout:  # type: ignore
+                line = line.rstrip("\n")
+                tail.append(line)
+                if len(tail) > 40:
+                    tail.pop(0)
+                m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                if m:
+                    with JOBS_LOCK:
+                        job["progress"] = float(m.group(1))
+                # merge/extract stage
+                if "Merging formats" in line or "Extracting audio" in line:
+                    with JOBS_LOCK:
+                        job["phase"] = "merging"
+            proc.wait()
+        except Exception as e:  # noqa
+            _job_failed(job, str(e), tail)
+            return
+
+        if proc.returncode != 0:
+            _job_failed(job, explain_failure(tail, proc.returncode), tail)
+            return
 
     # collect produced files (skip .part / .ytdl)
     files = []
@@ -613,7 +850,7 @@ def run_job(job_id):
                           "rel": job_id + "/" + name})
 
     if not files:
-        msg = "没有产出文件：yt-dlp 没有报错但没有下载到内容，链接可能不是视频页面。"
+        msg = "没有产出文件：下载过程没报错但没有拿到内容，链接可能不是视频页面。"
         with JOBS_LOCK:
             job["status"] = "error"
             job["error"] = msg
