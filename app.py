@@ -570,28 +570,90 @@ def _parse_douyin_cookies(path):
     """
     if not path or not os.path.isfile(path):
         return "", "", 0, False
-    pairs, uifids = [], {}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                s = line.rstrip("\r\n")
-                if s.startswith("#HttpOnly_"):
-                    s = s[len("#HttpOnly_"):]
-                elif s.startswith("#") or not s.strip():
-                    continue
-                parts = s.split("\t")
-                if len(parts) != 7:
-                    continue
-                domain, name, value = parts[0].lower(), parts[5].strip(), parts[6].strip()
-                if "douyin.com" not in domain or not name:
-                    continue
-                pairs.append(f"{name}={value}")
-                if name.upper().startswith("UIFID"):
-                    uifids.setdefault(name.upper(), value)
+            text = fh.read()
     except OSError:
         return "", "", 0, False
+
+    pairs, uifids = [], {}
+
+    def add(domain, name, value):
+        if "douyin.com" not in (domain or "").lower() or not name:
+            return
+        pairs.append(f"{name}={value}")
+        if name.upper().startswith("UIFID"):
+            uifids.setdefault(name.upper(), value)
+
+    # 标准 Netscape 格式（浏览器扩展的默认导出）
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#HttpOnly_"):
+            s = s[len("#HttpOnly_"):]
+        elif s.startswith("#"):
+            continue
+        parts = s.split("\t")
+        if len(parts) >= 7:
+            add(parts[0], parts[5].strip(), parts[6].strip())
+
+    # JSON 导出（EditThisCookie / Cookie-Editor）
+    if not pairs and text.lstrip().startswith(("[", "{")):
+        try:
+            data = json.loads(text)
+            items = data if isinstance(data, list) else (data.get("cookies") or [])
+            for item in items:
+                if isinstance(item, dict):
+                    host = item.get("domain") or urlparse(item.get("url") or "").hostname or ""
+                    add(host, str(item.get("name") or ""), str(item.get("value") or ""))
+        except ValueError:
+            pass
+
+    # 兜底：有些工具把 tab 换成了空格，按空白切 7 段
+    if not pairs and not text.lstrip().startswith(("[", "{")):
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("#HttpOnly_"):
+                s = s[len("#HttpOnly_"):]
+            elif s.startswith("#"):
+                continue
+            f = s.split(maxsplit=6)
+            if len(f) == 7:
+                add(f[0], f[5], f[6])
+
+    # 还不行就按行抓 UIFID
+    if not uifids:
+        for m in re.finditer(r"(?m)^.*douyin\.com.*?\b(UIFID(?:_TEMP)?)\s+(\S+)\s*$", text):
+            add(".douyin.com", m.group(1), m.group(2))
+            break
+
     uifid = uifids.get("UIFID") or uifids.get("UIFID_TEMP") or next(iter(uifids.values()), "")
-    return "; ".join(pairs), uifid, len(pairs), bool(uifid)
+    return "; ".join(dict.fromkeys(pairs)), uifid, len(pairs), bool(uifid)
+
+
+def _douyin_cookie_names(path):
+    """Cookie 名字列表（不含值），只用于 /api/health 排查上传是否正确。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    names = set()
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#HttpOnly_"):
+            s = s[len("#HttpOnly_"):]
+        elif s.startswith("#"):
+            continue
+        f = s.split("\t")
+        if len(f) >= 7 and "douyin.com" in f[0].lower() and f[5].strip():
+            names.add(f[5].strip())
+    return sorted(names)[:12]
 
 
 def douyin_sign(url, uifid, ts=None):
@@ -946,9 +1008,11 @@ class Handler(BaseHTTPRequestHandler):
             ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
             cookie_list = cookie_files()
             try:
-                _, _, dy_n, dy_ok = _parse_douyin_cookies(merged_cookies_path())
+                merged = merged_cookies_path()
+                _, _, dy_n, dy_ok = _parse_douyin_cookies(merged)
+                dy_names = _douyin_cookie_names(merged)
             except Exception:  # noqa
-                dy_n, dy_ok = 0, False
+                dy_n, dy_ok, dy_names = 0, False, []
             return self._send_json({"ok": True, "yt_dlp": yt_dlp_version(),
                                     "engine": " ".join(YTDLP),
                                     "ffmpeg": ffmpeg_ok,
@@ -956,6 +1020,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "cookies_files": len(cookie_list),
                                     "douyin_cookies": dy_n,
                                     "douyin_uifid": dy_ok,
+                                    "douyin_names": dy_names,
                                     "mobile_safe": MOBILE_SAFE,
                                     "retention_hours": RETENTION_HOURS})
         if path == "/api/jobs":
