@@ -469,6 +469,14 @@ def probe_media(path):
         duration = float(fmt.get("duration") or 0)
     except (TypeError, ValueError):
         duration = 0.0
+    rotation = 0
+    if vid is not None:
+        for sd in vid.get("side_data_list") or []:
+            if "rotation" in sd:
+                try:
+                    rotation = int(float(sd["rotation"]))
+                except (TypeError, ValueError):
+                    pass
     return {
         "format": fmt.get("format_name") or "",
         "duration": duration or None,
@@ -480,6 +488,8 @@ def probe_media(path):
         "vlevel": (vid or {}).get("level"),
         "width": (vid or {}).get("width"),
         "height": (vid or {}).get("height"),
+        "sar": (vid or {}).get("sample_aspect_ratio"),
+        "rotation": rotation,
         "acodec": (aud or {}).get("codec_name"),
         "aprofile": (aud or {}).get("profile"),
     }
@@ -506,6 +516,19 @@ def apple_incompat_reason(info):
     lvl = info.get("vlevel") or 0
     if lvl > APPLE_MAX_H264_LEVEL:
         return f"H.264 level {lvl / 10:.1f} 超出 iOS 支持范围"
+    sar = info.get("sar") or ""
+    if sar not in ("", "1:1", "0:1", "N/A"):
+        # 非方形像素：有些播放器按显示宽高比播放，有些忽略 SAR，
+        # 同一个文件在不同手机上比例会不一样。统一转成 1:1。
+        try:
+            sa, sb = (int(x) for x in sar.split(":"))
+            if sa != sb:
+                return f"像素宽高比 {sar} 不是 1:1（手机上可能被拉变形）"
+        except (ValueError, TypeError):
+            pass
+    rot = info.get("rotation") or 0
+    if rot % 360 != 0:
+        return f"视频带 {rot}° 旋转标记，部分播放器不认（会方向/比例错乱）"
     a = info.get("acodec")
     if a is not None and a not in APPLE_SAFE_AUDIO:
         return f"音频编码是 {a}，iOS/微信支持不佳"
@@ -539,7 +562,9 @@ def ensure_apple_playable(video_path, job=None):
     tmp = base + ".__iosfix.mp4"
     out_path = base + ".mp4"
 
-    vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"  # 保证宽高是偶数(H.264 要求)
+    # 宽高取偶数（H.264 要求）；同时把非方形像素换算成方形像素（setsar=1），
+    # 否则同一个文件在 iPhone 和 Chrome 上可能一个正常一个被拉变形。
+    vf = "scale=w='trunc(iw*sar/2)*2':h=trunc(ih/2)*2,setsar=1"
     if TRANSCODE_MAX_HEIGHT > 0:
         h = TRANSCODE_MAX_HEIGHT
         vf = (f"scale=w='if(gt(ih,{h}),-2,iw)':h='min(ih,{h})'," + vf)

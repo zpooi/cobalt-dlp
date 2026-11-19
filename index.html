@@ -259,11 +259,12 @@
   .modal.open{display:grid;animation:fade .18s ease}
   @keyframes fade{from{opacity:0}to{opacity:1}}
   .modal .inner{
-    max-width:900px;width:100%;background:#fff;border-radius:22px;
+    max-width:900px;width:100%;min-width:0;background:#fff;border-radius:22px;
     padding:14px;box-shadow:var(--shadow-lg);
   }
   .modal .mhead{display:flex;align-items:center;gap:12px;padding:2px 4px 12px}
   .modal .mhead .t{
+    flex:1;min-width:0;
     font-weight:600;font-size:14px;color:var(--text-2);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   }
@@ -273,7 +274,13 @@
     cursor:pointer;display:grid;place-items:center;transition:.15s;
   }
   .modal .close:hover{background:#e9ecf5;color:var(--text)}
-  .modal video{width:100%;border-radius:14px;background:#0d1119;display:block;max-height:min(78vh, 78dvh)}
+  /* 关键：不能同时写 width:100% + max-height，否则竖屏视频会被拉变形。
+     让宽度/高度都由视频本身比例决定，再限制在可视区域内。 */
+  .modal video{
+    display:block;margin:0 auto;background:#0d1119;border-radius:14px;
+    width:auto;height:auto;max-width:100%;max-height:min(78vh, 78dvh);
+    object-fit:contain;
+  }
 
   /* ---------- toast ---------- */
   .toast{
