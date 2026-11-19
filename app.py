@@ -358,8 +358,10 @@ def explain_failure(lines, returncode):
                 "把从浏览器导出的 cookies 放进服务器 cookies/ 目录后重新下载即可，无需重启。")
     if ("sign in to confirm" in low or "not a bot" in low
             or ("confirm" in low and "bot" in low)):
-        return ("YouTube 把服务器 IP 当成机器人了（已自动换过 tv / safari 客户端）。"
-                "在 cookies/ 目录放一份登录后的 YouTube cookies 成功率最高；仍不行就需要换出口 IP。")
+        return ("YouTube 把服务器 IP 当成机器人了（已自动强制 IPv4 并轮换过 "
+                "visionOS/android_vr/tv_downgraded/web_embedded 等客户端）。"
+                "这个校验最终看 IP 信誉：请在浏览器登录 YouTube（建议用专门的小号）导出 cookies "
+                "放进 cookies/ 目录，或给服务器换一个不被标记的出口 IP。")
     if "429" in low or "too many requests" in low or "rate limit" in low or "rate-limit" in low:
         return f"{who}限流了：等几分钟再试。配置该站 cookies 可以降低触发限流的概率。"
     if ("sign in" in low or "login" in low or "log in" in low
@@ -1009,17 +1011,22 @@ def yt_dlp_attempts(job):
     out = [("默认", fmt, [])]
     if host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com")):
         # 机房 IP 上 YouTube 常报 "Sign in to confirm you're not a bot"。
-        # visionos / android_vr 这两个客户端既不需要 PO token，也不做登录校验，
-        # 实测能从机房 IP 拿到视频（visionos 还能给 1080p），所以放在前面；
-        # tv / web_safari 作为补充（它们的返回格式经常受 SABR 限制）。
+        out[0] = ("默认（IPv4）", fmt, ["--force-ipv4"])
+        # 先强制 IPv4：GCP/部分 VPS 的 IPv6 段被 YouTube 整段降权，IPv4 往往就能过。
+        # 再轮换客户端：visionos/android_vr/tv_downgraded/web_embedded 这几家
+        # 不强制要 PO token，实测最抗机房 IP 的风控。
         for label, client in (
             ("visionOS 客户端", "visionos"),
             ("android_vr 客户端", "android_vr"),
+            ("tv_downgraded 客户端", "tv_downgraded"),
+            ("web_embedded 客户端", "web_embedded"),
+            ("mweb 客户端", "mweb"),
             ("tv 客户端", "tv"),
             ("safari 客户端", "web_safari"),
         ):
             out.append((f"YouTube {label}", fmt,
-                        ["--extractor-args", f"youtube:player_client={client}"]))
+                        ["--force-ipv4",
+                         "--extractor-args", f"youtube:player_client={client}"]))
     elif host.endswith(("x.com", "twitter.com")):
         # 机房 IP 上 GraphQL 接口可能被限流；syndication 接口不需要登录，
         # 在拿不到 guest token 时通常还能取到视频地址。

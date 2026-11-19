@@ -86,7 +86,7 @@ cobalt-dlp/
 | 虎牙（直播/回放） | ✅ 可用 | 不需要 |
 | 小红书（含 `xhslink.com` 短链） | ⚠️ 仅视频笔记 | **必须**：不配 cookies 会被登录墙拦下；图文笔记不支持 |
 | 西瓜视频 | ⚠️ 需要 cookies | 未登录时提取器直接要求 cookies |
-| YouTube | ✅ 可用 | 一般不需要（自动切客户端）；被判定"机器人"时需要 |
+| YouTube | ✅ 可用 | 家宽 IP 一般不需要；**机房 IP 基本必须**（程序会先强制 IPv4 + 轮换 8 种客户端，仍被判定"机器人"就只能配 cookies） |
 | Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies |
 | SoundCloud / Pinterest | ✅ 可用 | 不需要 |
 | Facebook / Reddit / Vimeo 等 | ✅ yt-dlp 支持的都行 | 视内容 |
@@ -103,7 +103,8 @@ cobalt-dlp/
 - **cookies 自动合并**：`cookies/` 下所有 `.txt`（Netscape 或 JSON 格式）按修改时间从旧到新合并，同站点的重复 cookie 以最新导出为准
 - **B站 412**：自动向 bilibili 要访客 cookie（`buvid3`/`buvid4`/`b_nut`）补进 cookies，并用浏览器 TLS 指纹重试——机房 IP 不加这个必 412
 - **小红书 / 微博**：没配 cookies 时自动去要首页下发的访客 cookie（`a1`/`SUB` 这类关键 cookie 登录才有）
-- **YouTube 机器人校验**：自动依次尝试默认 → `visionos` → `android_vr` → `tv` → `web_safari` 客户端（前两个不需要 PO token，机房 IP 最容易过），全失败才报错
+- **YouTube 机器人校验**：先强制走 IPv4（GCP 等 VPS 的 IPv6 段常被 YouTube 整段降权），再依次尝试默认 → `visionos` → `android_vr` → `tv_downgraded` → `web_embedded` → `mweb` → `tv` → `web_safari` 客户端，全失败才报错
+- **YouTube JS 挑战**：镜像内置 Deno（yt-dlp 2026 需要的 JS 运行时），用来解 nsig、少踩"格式缺失/机器人"
 - **X（Twitter）限流**：GraphQL 接口被限流/拒绝时自动切到 syndication 接口再试
 - **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
 - **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试
@@ -112,6 +113,12 @@ cobalt-dlp/
 **关于 cookies**：按站分开存成多个文件最省事（`www.douyin_com_cookies.txt`、`bilibili.txt`…），替换或新增后直接重新下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
 
 **抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
+
+**机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战），仍然被拦时**唯一稳定的办法是配 cookies**：
+
+1. 浏览器登录 YouTube（建议用专门的小号，避免主号被风控）；
+2. 用扩展导出 youtube.com 的 cookies（Netscape 格式），保存为 `cookies/youtube.txt`；
+3. 重新下载即可，不用重启容器。
 
 **服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严；抖音的签名请求专门针对机房 IP 设计。B站对机房 IP 的 412 风控偶尔连 buvid3/buvid4/b_nut 也拦——这时配置一份 B 站登录 cookies（含 `SESSDATA`）或国内出口代理，比任何自动手段都稳。YouTube 在机房 IP 会触发"确认你不是机器人"，程序会自动切到 `visionos`/`android_vr` 客户端（不需要 PO token）；X 的 GraphQL 接口被限流时会自动改用 syndication 接口。
 
