@@ -494,120 +494,162 @@ async function submit(){
   finally{ $("#go").disabled=false; }
 }
 
+// id -> 卡片节点。轮询时原地更新，不再整列表重绘——重绘会让卡片入场动画
+// 和缩略图反复重播，看起来就是"一闪一闪"。
+const cards = new Map();
+
+function setText(node, text){
+  if(node.textContent !== text) node.textContent = text;
+}
+
 function jobCard(job){
   const card = el("div","card job");
   card.dataset.id = job.id;
 
-  const thumb = el("div","thumb");
-  const file = (job.files&&job.files[0]) || null;
-  if(job.status==="done" && file && isVideo(file.name)){
-    thumb.innerHTML = `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline></video>`;
-  }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
-    thumb.innerHTML = `<img src="${fileUrl(file.rel)}" alt="">`;
-  }else if(job.status==="done" && file && isAudio(file.name)){
-    thumb.innerHTML = ICON.music;
-  }else{
-    thumb.innerHTML = ICON.clip;
-  }
-  card.appendChild(thumb);
+  const thumb = el("div","thumb"); card.appendChild(thumb);
 
   const meta = el("div","meta");
-  const name = el("div","name");
-  // 完成前用来源域名做标题（比"解析中…+一整条 URL"清爽得多）
-  const fallback = job.status==="error" ? "下载失败" : (hostOf(job.url) || "正在解析…");
-  name.textContent = (job.filename) || fallback;
-  name.title = name.textContent;
-  meta.appendChild(name);
+  const name = el("div","name"); meta.appendChild(name);
+  const urlEl = el("div","url"); meta.appendChild(urlEl);
 
-  const urlEl = el("div","url"); urlEl.textContent = job.url; urlEl.title = job.url;
-  meta.appendChild(urlEl);
-
-  const bar = el("div","bar"+(job.status==="done"?" done":(job.status==="error"?" hidden":"")));
+  const bar = el("div","bar");
   const fill = el("i"); bar.appendChild(fill); meta.appendChild(bar);
 
   const sl = el("div","status-line");
-  const badge = el("span","badge "+job.status);
-  const label = {queued:"排队中",running:"下载中",done:"已完成",error:"失败"}[job.status]||job.status;
-  badge.textContent = label; sl.appendChild(badge);
-
-  if(job.status==="running"){
-    const p = el("span");
-    p.textContent = job.phase==="converting" ? "转码中…" : (job.phase==="merging" ? "合并中…" : `${Math.round(job.progress||0)}%`);
-    sl.appendChild(p);
-  }
-  if(job.status==="queued"){
-    const p = el("span"); p.textContent = "等待开始"; sl.appendChild(p);
-  }
-  if(job.status==="done" && file){
-    const p = el("span"); p.textContent = humanSize(file.size); sl.appendChild(p);
-  }
-  if((job.status==="done"||job.status==="error") && job.expires){
-    const rem = el("span","remain");
-    const update = ()=>{
-      const left = job.expires - Date.now();
-      rem.textContent = "⏳ " + remainText(left);
-      rem.classList.toggle("soon", left < 3600*1000);
-    };
-    update();
-    sl.appendChild(rem);
-  }
+  const badge = el("span","badge"); sl.appendChild(badge);
+  const info = el("span"); sl.appendChild(info);
+  const remain = el("span","remain"); remain.style.display = "none"; sl.appendChild(remain);
   meta.appendChild(sl);
 
-  if(job.status==="error" && job.error){
-    const e = el("div","err-msg"); e.textContent = job.error; meta.appendChild(e);
-    // 原始 yt-dlp 输出折叠起来，需要排查时再展开
-    if(job.log){
-      const det = el("details","logbox");
-      const sum = el("summary"); sum.textContent = "yt-dlp 输出"; det.appendChild(sum);
-      const pre = el("pre"); pre.textContent = job.log; det.appendChild(pre);
-      meta.appendChild(det);
-    }
-  }
-  // 后端的转码/兼容性提示（"已是 H.264，无需转码" / "转码为 H.264/AAC：视频编码是 vp9…"）
-  const note = (job.notes||[]).slice(-1)[0];
-  if(note && job.status!=="error"){
-    const n = el("div","note");
-    n.innerHTML = ICON.info;
-    const span = el("span"); span.textContent = note; n.appendChild(span);
-    n.title = note;
-    meta.appendChild(n);
-  }
+  // 失败信息、原始输出、转码提示都先建好再按状态显隐，
+  // 这样状态切换时卡片结构不变，也就不会闪。
+  const errEl = el("div","err-msg"); errEl.style.display = "none"; meta.appendChild(errEl);
+  const det = el("details","logbox"); det.style.display = "none";
+  const sum = el("summary"); sum.textContent = "yt-dlp 输出"; det.appendChild(sum);
+  const pre = el("pre"); det.appendChild(pre);
+  meta.appendChild(det);
+  const noteEl = el("div","note"); noteEl.innerHTML = ICON.info;
+  const noteSpan = el("span"); noteEl.appendChild(noteSpan);
+  noteEl.style.display = "none"; meta.appendChild(noteEl);
+
   card.appendChild(meta);
 
-  const pct = job.status==="done"?100:(job.progress||0);
-  fill.style.width = pct+"%";
+  const actions = el("div","actions"); card.appendChild(actions);
 
-  const actions = el("div","actions");
-  if(job.status==="done" && file){
-    if(!isAudio(file.name)){
-      const play = el("button","ico-btn play"); play.title="播放"; play.setAttribute("aria-label","播放");
-      play.innerHTML = ICON.play;
-      play.onclick = ()=>openPlayer(file.name, fileUrl(file.rel));
-      actions.appendChild(play);
-    }
-    const dl = el("a","ico-btn"); dl.title="下载"; dl.setAttribute("aria-label","下载");
-    dl.href=fileUrl(file.rel)+"?dl=1"; dl.download=file.name;
-    dl.innerHTML = ICON.dl;
-    actions.appendChild(dl);
-  }
-  if(job.status==="error"){
-    const retry = el("button","ico-btn retry"); retry.title="重新下载"; retry.setAttribute("aria-label","重新下载");
-    retry.innerHTML = ICON.retry;
-    retry.onclick = async ()=>{
-      retry.disabled = true;
-      try{ await createJob(job.url, job.quality||"best"); toast("已重新加入队列"); refresh(); startPoll(); }
-      catch(e){ toast(e.message); }
-      finally{ retry.disabled = false; }
-    };
-    actions.appendChild(retry);
-  }
-  const del = el("button","ico-btn del"); del.title="删除"; del.setAttribute("aria-label","删除");
-  del.innerHTML = ICON.del;
-  del.onclick = ()=>deleteJob(job.id);
-  actions.appendChild(del);
-  card.appendChild(actions);
-
+  card._refs = {thumb, name, urlEl, bar, fill, badge, info, remain,
+                errEl, det, pre, noteEl, noteSpan, actions,
+                thumbSig: null, actionsSig: null, logText: "", noteText: ""};
+  updateCard(card, job);
   return card;
+}
+
+function updateCard(card, job){
+  const r = card._refs;
+  const file = (job.files && job.files[0]) || null;
+
+  // 缩略图只在文件真正变化时重建：轮询不会让 <video> 反复加载
+  const thumbSig = job.status + "|" + (file ? file.rel : "");
+  if(r.thumbSig !== thumbSig){
+    r.thumbSig = thumbSig;
+    if(job.status==="done" && file && isVideo(file.name)){
+      r.thumb.innerHTML = `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline"></video>`;
+    }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
+      r.thumb.innerHTML = `<img src="${fileUrl(file.rel)}" alt="">`;
+    }else if(job.status==="done" && file && isAudio(file.name)){
+      r.thumb.innerHTML = ICON.music;
+    }else{
+      r.thumb.innerHTML = ICON.clip;
+    }
+  }
+
+  // 完成前用来源域名做标题（比"解析中…+一整条 URL"清爽得多）
+  const fallback = job.status==="error" ? "下载失败" : (hostOf(job.url) || "正在解析…");
+  setText(r.name, job.filename || fallback);
+  r.name.title = r.name.textContent;
+  setText(r.urlEl, job.url);
+  r.urlEl.title = job.url;
+
+  r.bar.className = "bar" + (job.status==="done" ? " done" : (job.status==="error" ? " hidden" : ""));
+  r.fill.style.width = (job.status==="done" ? 100 : (job.progress||0)) + "%";
+
+  const label = {queued:"排队中",running:"下载中",done:"已完成",error:"失败"}[job.status]||job.status;
+  if(r.badge.className !== "badge "+job.status) r.badge.className = "badge "+job.status;
+  setText(r.badge, label);
+
+  let info = "";
+  if(job.status==="running"){
+    info = job.phase==="converting" ? "转码中…" : (job.phase==="merging" ? "合并中…" : `${Math.round(job.progress||0)}%`);
+  }else if(job.status==="queued"){
+    info = "等待开始";
+  }else if(job.status==="done" && file){
+    info = humanSize(file.size);
+  }
+  setText(r.info, info);
+  r.info.style.display = info ? "" : "none";
+
+  if((job.status==="done"||job.status==="error") && job.expires){
+    const left = job.expires - Date.now();
+    setText(r.remain, "⏳ " + remainText(left));
+    r.remain.classList.toggle("soon", left < 3600*1000);
+    r.remain.style.display = "";
+  }else{
+    r.remain.style.display = "none";
+  }
+
+  const hasErr = job.status==="error" && !!job.error;
+  r.errEl.style.display = hasErr ? "" : "none";
+  if(hasErr) setText(r.errEl, job.error);
+
+  const log = hasErr ? (job.log||"") : "";
+  r.det.style.display = log ? "" : "none";
+  if(r.logText !== log){
+    r.logText = log;
+    r.pre.textContent = log;
+    if(!log) r.det.open = false;
+  }
+
+  // 后端的转码/兼容性提示（"已是 H.264，无需转码" / "转码为 H.264/AAC…"）
+  const note = job.status!=="error" ? ((job.notes||[]).slice(-1)[0]||"") : "";
+  r.noteEl.style.display = note ? "flex" : "none";
+  if(r.noteText !== note){
+    r.noteText = note;
+    r.noteSpan.textContent = note;
+    r.noteEl.title = note;
+  }
+
+  // 操作按钮只在状态/文件变化时重建，避免每次轮询重绑事件
+  const actionsSig = job.status + "|" + (file ? file.rel : "");
+  if(r.actionsSig !== actionsSig){
+    r.actionsSig = actionsSig;
+    r.actions.innerHTML = "";
+    if(job.status==="done" && file){
+      if(!isAudio(file.name)){
+        const play = el("button","ico-btn play"); play.title="播放"; play.setAttribute("aria-label","播放");
+        play.innerHTML = ICON.play;
+        play.onclick = ()=>openPlayer(file.name, fileUrl(file.rel));
+        r.actions.appendChild(play);
+      }
+      const dl = el("a","ico-btn"); dl.title="下载"; dl.setAttribute("aria-label","下载");
+      dl.href=fileUrl(file.rel)+"?dl=1"; dl.download=file.name;
+      dl.innerHTML = ICON.dl;
+      r.actions.appendChild(dl);
+    }
+    if(job.status==="error"){
+      const retry = el("button","ico-btn retry"); retry.title="重新下载"; retry.setAttribute("aria-label","重新下载");
+      retry.innerHTML = ICON.retry;
+      retry.onclick = async ()=>{
+        retry.disabled = true;
+        try{ await createJob(job.url, job.quality||"best"); toast("已重新加入队列"); refresh(); startPoll(); }
+        catch(e){ toast(e.message); }
+        finally{ retry.disabled = false; }
+      };
+      r.actions.appendChild(retry);
+    }
+    const del = el("button","ico-btn del"); del.title="删除"; del.setAttribute("aria-label","删除");
+    del.innerHTML = ICON.del;
+    del.onclick = ()=>deleteJob(job.id);
+    r.actions.appendChild(del);
+  }
 }
 
 function emptyState(){
@@ -624,9 +666,41 @@ function renderJobs(jobs){
   // 没有已完成/失败的任务时，不显示"清除已完成"
   const finished = jobs.some(j=> j.status==="done" || j.status==="error");
   $("#clearDone").style.visibility = finished ? "visible" : "hidden";
-  if(!jobs.length){ box.innerHTML = emptyState(); return; }
-  box.innerHTML="";
-  jobs.forEach(j=> box.appendChild(jobCard(j)));
+
+  if(!jobs.length){
+    cards.clear();
+    box.innerHTML = emptyState();
+    return;
+  }
+  const empty = box.querySelector(".empty");
+  if(empty) empty.remove();
+
+  const seen = new Set();
+  const nodes = [];
+  jobs.forEach(job=>{
+    let card = cards.get(job.id);
+    if(card){
+      updateCard(card, job);   // 原地更新，不重建节点
+    }else{
+      card = jobCard(job);
+      cards.set(job.id, card);
+    }
+    seen.add(job.id);
+    nodes.push(card);
+  });
+  for(const [id, card] of [...cards]){
+    if(!seen.has(id)){ card.remove(); cards.delete(id); }
+  }
+  // DOM 顺序与列表保持一致。从后往前塞：新任务插到最前面，
+  // 已有的节点不动——移动节点也可能重播入场动画。
+  let next = null;
+  for(let i = nodes.length - 1; i >= 0; i--){
+    const node = nodes[i];
+    if(node.parentNode !== box || node.nextSibling !== next){
+      box.insertBefore(node, next);
+    }
+    next = node;
+  }
 }
 
 async function refresh(){
