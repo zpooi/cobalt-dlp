@@ -326,6 +326,10 @@ def explain_failure(lines, returncode):
     if ("unavailable" in low or "not available" in low or "removed" in low
             or "not exist" in low or "not found" in low):
         return "视频不存在，或已被删除 / 设为不可见。"
+    if "412" in low or "precondition failed" in low:
+        return ("目标站点风控拦截（HTTP 412）：多见于 B 站对机房 IP 的限制。"
+                "程序会自动补充 buvid3 访客 cookie；如果仍失败，请在浏览器登录后导出该站 cookies "
+                "放进 cookies/ 目录再试。")
     if "403" in low:
         return f"{who}拒绝了请求（HTTP 403），通常需要 cookies 或更换服务器出口网络。"
     if "404" in low:
@@ -796,6 +800,50 @@ def douyin_to_mp3(video_path, job):
     return out
 
 
+def _bilibili_buvid():
+    try:
+        req = urllib.request.Request("https://api.bilibili.com/x/frontend/finger/spi",
+                                     headers={"User-Agent": UA_DESKTOP})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read() or b"{}")
+        d = data.get("data") or {}
+        return d.get("b_3") or "", d.get("b_4") or ""
+    except Exception:  # noqa
+        return "", ""
+
+
+def cookies_with_buvid(cookies_path, job_dir, job=None):
+    """B 站从机房 IP 访问常返回 412，需要 buvid3 访客 cookie。
+
+    用户没配 B 站 cookies 时，自动向 bilibili 要一对访客 ID 补进 cookies 文件。
+    """
+    text = ""
+    if cookies_path:
+        try:
+            with open(cookies_path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+    if "buvid3" in text:
+        return cookies_path
+    b3, b4 = _bilibili_buvid()
+    if not b3:
+        return cookies_path
+    out = os.path.join(job_dir, "bili-cookies.temp")
+    exp = int(time.time()) + 365 * 86400
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        if text:
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+        fh.write("# Netscape HTTP Cookie File\n")
+        fh.write(f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\tbuvid3\t{b3}\n")
+        if b4:
+            fh.write(f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\tbuvid4\t{b4}\n")
+    _job_note(job, "B站：已自动补充访客 cookie（buvid3/buvid4），用于绕过 412 风控")
+    return out
+
+
 def douyin_download(job, job_dir, video_id):
     """下载抖音视频/音频，返回产出的文件路径。"""
     try:
@@ -874,6 +922,8 @@ def run_job(job_id):
         except Exception as e:  # noqa
             cookies = None
             _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+        if "bilibili.com" in (urlparse(job["url"]).hostname or "").lower():
+            cookies = cookies_with_buvid(cookies, job_dir, job)
         if cookies:
             cmd += ["--cookies", cookies]
         cmd += [job["url"]]
