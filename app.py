@@ -140,6 +140,28 @@ QUALITY_FMT = {
 }
 
 
+# 国内 App 分享出来的是整段文字，链接夹在中文和表情符号中间，例如：
+#   "7.20 复制打开抖音，看看【xxx的作品】… https://v.douyin.com/iAbCdEf/ 复制此链接…"
+#   "97 xxx发布了一篇小红书笔记… http://xhslink.com/a/xxxx，复制本条信息…"
+#   "【标题-哔哩哔哩】 https://b23.tv/xxxx"
+# 字符集里排除：空白、引号、中英文标点、CJK 汉字/假名/全角符号。
+# 分享链接后面常常直接跟着"复制此链接…"且没有空格，遇到 CJK 必须截断，
+# 否则会把后面一大段中文当成 URL 的一部分。
+URL_RE = re.compile(
+    r"https?://[^\s<>\"'，。、；！？【】（）()\[\]{}「」『』《》"
+    r"　㐀-䶿一-鿿＀-￯]+")
+URL_TRAIL = ".,;:!?)]}>'\"，。、；：！？）】」』》"
+
+
+def extract_url(text):
+    """Pull the first http(s) URL out of arbitrary pasted text."""
+    text = (text or "").strip()
+    m = URL_RE.search(text)
+    if not m:
+        return ""
+    return m.group(0).rstrip(URL_TRAIL)
+
+
 def safe_name(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", s)
     return s[:120].strip("_") or "file"
@@ -548,10 +570,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/fetch":
             body = self._read_json()
-            url = (body.get("url") or "").strip()
+            raw = (body.get("url") or "").strip()
             quality = (body.get("quality") or "best").strip()
-            if not url or not re.match(r"^https?://", url):
-                return self._send_json({"error": "invalid url"}, 400)
+            # 允许直接粘贴 App 的分享文案，从里面抠出链接
+            url = extract_url(raw)
+            if not url:
+                return self._send_json(
+                    {"error": "没找到链接：请粘贴包含 http(s) 链接的内容（抖音/小红书/B站等的分享文案可以直接粘）"},
+                    400)
             if quality not in QUALITY_FMT:
                 quality = "best"
             job_id = uuid.uuid4().hex[:16]

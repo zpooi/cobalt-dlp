@@ -4,7 +4,9 @@
 下载流量走服务器网络，不经过你本机；适合国内网络访问 Instagram / YouTube / TikTok / X / Bilibili 等。
 
 ## 特性
-- 支持 Instagram、YouTube、TikTok、X/Twitter、Bilibili、SoundCloud、Pinterest 等（yt-dlp 支持的都行）
+- 支持 Instagram、YouTube、TikTok、X/Twitter、SoundCloud、Pinterest 等（yt-dlp 支持的都行）
+- 支持国内平台：**B站、抖音、小红书、微博、优酷、爱奇艺、西瓜视频、今日头条、搜狐、AcFun、知乎、CCTV、QQ音乐、网易云音乐、喜马拉雅、虎牙、斗鱼**
+- **分享文案直接粘**：抖音/小红书/B站 App 复制出来的整段文字（带表情、带“复制此链接打开…”）会自动抠出链接，不用手动删
 - 页面内 **视频在线播放**（支持拖动进度）+ 一键下载
 - 清晰度可选：最佳 / 1080p / 720p / 480p / 仅音频
 - 实时进度条、任务列表、失败原因提示
@@ -70,6 +72,22 @@ cobalt-dlp/
 ├── downloads/            # 下载的文件（Docker 挂载到宿主机）
 └── cookies/              # 放 cookies.txt
 ```
+
+## 国内平台说明
+
+| 平台 | 情况 |
+|---|---|
+| B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 开箱可用；1080P 以上需要登录 cookies |
+| 抖音（含 `v.douyin.com` 短链） | ⚠️ 多数可用；服务器在海外时**大概率需要 cookies**，否则报"无法解析" |
+| 小红书（含 `xhslink.com` 短链） | ⚠️ 建议配 cookies（未登录时常被限制） |
+| 微博 / 优酷 / 爱奇艺 / 西瓜视频 / 今日头条 / 搜狐 / AcFun / 知乎 / CCTV | ✅ 直接可用 |
+| QQ音乐 / 网易云音乐 / 喜马拉雅 | ✅ 直接可用（选"仅音频"） |
+| 虎牙 / 斗鱼 直播与回放 | ✅ 直接可用 |
+| 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ yt-dlp 暂不支持 |
+
+**关于 cookies**：`cookies.txt` 是 Netscape 格式，一个文件里可以**同时放多个站**的 cookies（直接拼接即可，yt-dlp 会按域名取用）。抖音建议用浏览器登录后导出，见上一节。
+
+**服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严，这类站点如果报错，先确认 cookies 已配置；B站绝大多数视频海外可下，个别番剧有地区限制。
 
 ## 文件保留（自动清理）
 
