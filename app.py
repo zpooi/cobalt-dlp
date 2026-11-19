@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -36,6 +37,11 @@ from urllib.parse import urlparse, parse_qs, unquote
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.join(HERE, "downloads"))
 COOKIES_FILE = os.environ.get("COOKIES_FILE", os.path.join(HERE, "cookies.txt"))
+# 目录里的所有 *.txt 都会被自动合并成一个 cookies 文件：抖音导出成
+# www.douyin_com_cookies.txt、B站导出成 bilibili.txt 各放一份就行，不用手动拼接。
+COOKIES_DIR = os.environ.get("COOKIES_DIR") or os.path.dirname(COOKIES_FILE) or HERE
+COOKIES_MERGED = os.path.join(tempfile.gettempdir(), "cobalt-dlp-cookies.txt")
+COOKIES_LOCK = threading.Lock()
 PORT = int(os.environ.get("PORT", "13000"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "200"))
@@ -65,6 +71,81 @@ def purge_job_files(job_id):
         shutil.rmtree(d, ignore_errors=True)
     except Exception:
         pass
+
+
+def cookie_files():
+    """All non-empty cookie files we should feed to yt-dlp."""
+    found = []
+    if os.path.isdir(COOKIES_DIR):
+        for name in sorted(os.listdir(COOKIES_DIR)):
+            if not name.lower().endswith(".txt"):
+                continue
+            path = os.path.join(COOKIES_DIR, name)
+            try:
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    found.append(os.path.abspath(path))
+            except OSError:
+                pass
+    # 兼容老部署：COOKIES_FILE 指到目录外面时也要带上
+    try:
+        if (os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0
+                and os.path.abspath(COOKIES_FILE) not in found):
+            found.insert(0, os.path.abspath(COOKIES_FILE))
+    except OSError:
+        pass
+    return found
+
+
+def merged_cookies_path():
+    """Return a single Netscape cookies file for yt-dlp (None if unset).
+
+    yt-dlp 只接受一个 cookies 文件，所以把目录里的多个导出文件合成一份：
+    丢弃重复的注释头、去掉完全重复的行，保留 #HttpOnly_ 开头的行。
+    每次任务开始时重新合并，替换 cookies 后直接生效。
+    """
+    files = cookie_files()
+    if not files:
+        return None
+    if len(files) == 1:
+        return files[0]
+
+    lines, seen, header = [], set(), False
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("#") and not s.startswith("#HttpOnly_"):
+                if not header:
+                    lines.append("# Netscape HTTP Cookie File")
+                    header = True
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            lines.append(line)
+    if not lines:
+        return None
+
+    with COOKIES_LOCK:
+        fd, tmp = tempfile.mkstemp(prefix="cobalt-cookies-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(lines) + "\n")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, COOKIES_MERGED)   # 原子替换，别的任务不会读到半个文件
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+    return COOKIES_MERGED
 
 
 def cleanup_expired():
@@ -462,8 +543,13 @@ def run_job(job_id):
         cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
     else:
         cmd += ["--merge-output-format", "mp4"]
-    if os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
-        cmd += ["--cookies", COOKIES_FILE]
+    try:
+        cookies = merged_cookies_path()
+    except Exception as e:  # noqa
+        cookies = None
+        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+    if cookies:
+        cmd += ["--cookies", cookies]
     cmd += [job["url"]]
 
     with JOBS_LOCK:
@@ -616,11 +702,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_index()
         if path == "/api/health":
             ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
-            cookies_ok = os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0
+            cookie_list = cookie_files()
             return self._send_json({"ok": True, "yt_dlp": yt_dlp_version(),
                                     "engine": " ".join(YTDLP),
                                     "ffmpeg": ffmpeg_ok,
-                                    "cookies": cookies_ok,
+                                    "cookies": bool(cookie_list),
+                                    "cookies_files": len(cookie_list),
                                     "mobile_safe": MOBILE_SAFE,
                                     "retention_hours": RETENTION_HOURS})
         if path == "/api/jobs":

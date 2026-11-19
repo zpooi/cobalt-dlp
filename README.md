@@ -23,7 +23,7 @@ cd cobalt-dlp
 
 # 2. (可选) 放 cookies，支持登录内容
 mkdir -p cookies
-# 把你的 cookies.txt 放到 cookies/cookies.txt
+# 把你的 cookies.txt（或按站分开的多个 .txt）放到 cookies/ 目录
 
 # 3. 启动
 docker compose up -d --build
@@ -46,13 +46,13 @@ sudo apt update && sudo apt install -y ffmpeg python3-venv
 
 ## 如何导出 cookies（支持登录 / 避免限流）
 
-cookies 是一个 Netscape 格式的 `cookies.txt`。
+cookies 是 Netscape 格式的文本文件（浏览器扩展导出的就是）。
 
 **方式一：浏览器扩展（最简单）**
 1. Chrome/Edge 安装扩展 **"Get cookies.txt LOCALLY"**
 2. 登录 instagram.com（或 youtube.com）
 3. 点扩展 → Export → 保存为 `cookies.txt`
-4. 放到 `cobalt-dlp/cookies/cookies.txt`（Docker）或项目根目录 `cookies.txt`（直接跑）
+4. 放进 `cobalt-dlp/cookies/` 目录即可（Docker）。**不用改名、不用合并**：目录里每个 `*.txt` 都会被自动合成一份 cookies 交给 yt-dlp，比如 `cookies.txt`、`www.douyin_com_cookies.txt`、`bilibili.txt` 可以同时放着
 5. 重启：`docker compose restart`
 
 **方式二：yt-dlp 直接读浏览器（仅当服务器上有该浏览器会话时）**
@@ -70,7 +70,7 @@ cobalt-dlp/
 ├── docker-compose.yml
 ├── run.sh                # 非 Docker 启动
 ├── downloads/            # 下载的文件（Docker 挂载到宿主机）
-└── cookies/              # 放 cookies.txt
+└── cookies/              # 放 cookies（目录里所有 *.txt 自动合并）
 ```
 
 ## 国内平台说明
@@ -85,7 +85,7 @@ cobalt-dlp/
 | 虎牙 / 斗鱼 直播与回放 | ✅ 直接可用 |
 | 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ yt-dlp 暂不支持 |
 
-**关于 cookies**：`cookies.txt` 是 Netscape 格式，一个文件里可以**同时放多个站**的 cookies（直接拼接即可，yt-dlp 会按域名取用）。抖音建议用浏览器登录后导出，见上一节。cookies 文件是**每次任务开始前读取**的，替换后直接重新点下载即可，不用重启容器。
+**关于 cookies**：`cookies/` 目录里可以放**任意多个** `.txt` 导出文件，程序在每次任务开始时把它们合并成一份（去重、保留 `#HttpOnly_` 行），所以按站分开存就行，不需要手动拼接。替换或新增文件后直接重新点下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
 
 **服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严，这类站点如果报错，先确认 cookies 已配置；B站绝大多数视频海外可下，个别番剧有地区限制。
 
