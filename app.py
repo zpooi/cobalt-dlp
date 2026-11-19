@@ -563,15 +563,18 @@ def douyin_video_id(url):
     return m.group(1) if m else ""
 
 
-def _douyin_cookies(path):
-    """从合并后的 cookies 文件里取 douyin 的 Cookie 头和 UIFID。"""
+def _parse_douyin_cookies(path):
+    """(Cookie 头, 签名用的 uifid, cookie 数量, 是否找到 uifid)。
+
+    Douyin 会同时下发 UIFID 和 UIFID_TEMP，两者都能过 Argus 校验，优先 UIFID。
+    """
     if not path or not os.path.isfile(path):
-        return "", ""
-    pairs, uifid = [], ""
+        return "", "", 0, False
+    pairs, uifids = [], {}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                s = line.rstrip("\n")
+                s = line.rstrip("\r\n")
                 if s.startswith("#HttpOnly_"):
                     s = s[len("#HttpOnly_"):]
                 elif s.startswith("#") or not s.strip():
@@ -579,15 +582,16 @@ def _douyin_cookies(path):
                 parts = s.split("\t")
                 if len(parts) != 7:
                     continue
-                domain, name, value = parts[0].lower(), parts[5], parts[6]
+                domain, name, value = parts[0].lower(), parts[5].strip(), parts[6].strip()
                 if "douyin.com" not in domain or not name:
                     continue
                 pairs.append(f"{name}={value}")
-                if name.upper() == "UIFID" and not uifid:
-                    uifid = value
+                if name.upper().startswith("UIFID"):
+                    uifids.setdefault(name.upper(), value)
     except OSError:
-        return "", ""
-    return "; ".join(pairs), uifid
+        return "", "", 0, False
+    uifid = uifids.get("UIFID") or uifids.get("UIFID_TEMP") or next(iter(uifids.values()), "")
+    return "; ".join(pairs), uifid, len(pairs), bool(uifid)
 
 
 def douyin_sign(url, uifid, ts=None):
@@ -617,11 +621,13 @@ def douyin_sign(url, uifid, ts=None):
 
 
 def douyin_fetch_detail(video_id, cookies_path):
-    cookie_header, uifid = _douyin_cookies(cookies_path)
+    cookie_header, uifid, count, _ = _parse_douyin_cookies(cookies_path)
     if not uifid:
+        files = len(cookie_files())
         raise DouyinError(
-            "抖音需要 cookies：把浏览器导出的 douyin cookies（里面要有 UIFID）"
-            "放进 cookies/ 目录后重试。")
+            f"抖音 cookies 里没有 UIFID（合并后的文件里有 {count} 个抖音 cookie，"
+            f"共 {files} 个 cookies 文件）。请在浏览器登录 douyin.com 后重新导出 cookies，"
+            f"确认文件里有一行以 UIFID 开头的记录，放进 cookies/ 目录再试。")
     url = douyin_sign(
         f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={video_id}", uifid)
     headers = {
@@ -727,8 +733,7 @@ def douyin_download(job, job_dir, video_id):
     try:
         cookies = merged_cookies_path()
     except Exception as e:  # noqa
-        cookies = None
-        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+        raise DouyinError(f"cookies 合并失败：{e}")
     detail = douyin_fetch_detail(video_id, cookies)
     url = douyin_pick_url(detail)
     if not url:
@@ -940,11 +945,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
             cookie_list = cookie_files()
+            try:
+                _, _, dy_n, dy_ok = _parse_douyin_cookies(merged_cookies_path())
+            except Exception:  # noqa
+                dy_n, dy_ok = 0, False
             return self._send_json({"ok": True, "yt_dlp": yt_dlp_version(),
                                     "engine": " ".join(YTDLP),
                                     "ffmpeg": ffmpeg_ok,
                                     "cookies": bool(cookie_list),
                                     "cookies_files": len(cookie_list),
+                                    "douyin_cookies": dy_n,
+                                    "douyin_uifid": dy_ok,
                                     "mobile_safe": MOBILE_SAFE,
                                     "retention_hours": RETENTION_HOURS})
         if path == "/api/jobs":
