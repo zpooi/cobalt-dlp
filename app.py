@@ -112,6 +112,12 @@ def merged_cookies_path():
     if len(files) == 1:
         return files[0]
 
+    # 按修改时间从旧到新合并：同一站点重复的 cookie 以最新导出的为准
+    try:
+        files.sort(key=lambda p: os.path.getmtime(p))
+    except OSError:
+        pass
+
     lines, seen, header = [], set(), False
     for path in files:
         try:
@@ -583,7 +589,7 @@ def _parse_douyin_cookies(path):
             return
         pairs.append(f"{name}={value}")
         if name.upper().startswith("UIFID"):
-            uifids.setdefault(name.upper(), value)
+            uifids[name.upper()] = value   # 后出现的覆盖先出现的（合并顺序=旧→新）
 
     # 标准 Netscape 格式（浏览器扩展的默认导出）
     for line in text.splitlines():
