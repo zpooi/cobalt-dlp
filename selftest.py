@@ -187,7 +187,8 @@ def main(argv):
     import yt_dlp.version as ytv
     print(f"环境：yt-dlp {ytv.__version__} | JS 运行时：{'deno' if shutil.which('deno') else '无'}"
           f" | curl_cffi：{'有' if _has_curl_cffi() else '无'}"
-          f" | YouTube cookies：{youtube_cookie_state()}")
+          f" | YouTube cookies：{youtube_cookie_state()}"
+          f" | 代理：{'YouTube 专用' if app.YOUTUBE_PROXY else ('全局' if app.YTDLP_PROXY else '无')}")
     rows = []
     print("平台            结果   说明")
     print("-" * 78)

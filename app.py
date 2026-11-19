@@ -61,6 +61,11 @@ CLEANUP_INTERVAL = float(os.environ.get("CLEANUP_INTERVAL", "600"))
 MOBILE_SAFE = os.environ.get("MOBILE_SAFE", "1").lower() not in ("0", "false", "no", "off")
 # 转码时限制最大高度（例如 1080）；0 = 保持原分辨率。手机播放 4K 会卡，可设为 1080。
 TRANSCODE_MAX_HEIGHT = int(os.environ.get("TRANSCODE_MAX_HEIGHT", "0") or 0)
+# 出口代理（可选）。整台服务器的 IP 被某站封了时，可以只让 yt-dlp 走代理：
+#   YTDLP_PROXY    所有站点都走这个代理
+#   YOUTUBE_PROXY  只让 YouTube 走这个代理（不设置则沿用 YTDLP_PROXY）
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip()
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -1008,6 +1013,12 @@ def _host_of(url):
         return ""
 
 
+def _proxy_args(host):
+    is_youtube = host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com"))
+    proxy = (YOUTUBE_PROXY or YTDLP_PROXY) if is_youtube else YTDLP_PROXY
+    return ["--proxy", proxy] if proxy else []
+
+
 def yt_dlp_attempts(job):
     """按顺序尝试的 (说明, -f 选择器, 额外参数)。"""
     fmt = QUALITY_FMT.get(job.get("quality", "best"), QUALITY_FMT["best"])
@@ -1044,6 +1055,9 @@ def yt_dlp_attempts(job):
         out.append(("浏览器 TLS 指纹", fmt, ["--impersonate", "chrome"]))
     except Exception:  # noqa
         pass
+    proxy = _proxy_args(host)
+    if proxy:
+        out = [(label, f, extra + proxy) for label, f, extra in out]
     return out
 
 
@@ -1324,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "douyin_uifid": dy_ok,
                                     "douyin_names": dy_names,
                                     "mobile_safe": MOBILE_SAFE,
+                                    "proxy": bool(YTDLP_PROXY),
+                                    "youtube_proxy": bool(YOUTUBE_PROXY or YTDLP_PROXY),
                                     "retention_hours": RETENTION_HOURS})
         if path == "/api/jobs":
             with JOBS_LOCK:

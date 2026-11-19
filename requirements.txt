@@ -1,1 +1,3 @@
 yt-dlp>=2024.11.18
+# 支持 socks5:// 代理（用 YTDLP_PROXY / YOUTUBE_PROXY 指定出口时）
+PySocks>=1.7.1

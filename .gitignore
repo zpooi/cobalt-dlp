@@ -1,6 +1,8 @@
 downloads/
 cookies/
 cookies.txt
+# 服务器本地配置（代理等），不纳入版本控制，避免 git pull 冲突
+docker-compose.override.yml
 *.mp4
 *.mp3
 *.m4a

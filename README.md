@@ -114,11 +114,21 @@ cobalt-dlp/
 
 **抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
 
-**机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战），仍然被拦时**唯一稳定的办法是配 cookies**：
+**机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战）。处理顺序：
 
-1. 浏览器登录 YouTube（建议用专门的小号，避免主号被风控）；
-2. 用扩展导出 youtube.com 的 cookies（Netscape 格式），保存为 `cookies/youtube.txt`；
-3. 重新下载即可，不用重启容器。
+1. **先配登录 cookies**（建议用小号，避免主号被连带风控）：浏览器登录 youtube.com → 导出 Netscape 格式 → 保存为 `cookies/youtube.txt`。
+2. 如果配上**已登录** cookies 后，8 种客户端仍然全部报这个错，说明 IP 本身在黑名单里，cookies 和客户端都救不了，只能**换出口**：
+   - 准备一个代理（HTTP 或 SOCKS5，例如你家宽上 Clash 的 HTTP 端口）；
+   - 在服务器项目目录创建 `docker-compose.override.yml`（该文件已在 `.gitignore` 里，不会和 `git pull` 冲突）：
+     ```yaml
+     services:
+       savebox:
+         environment:
+           YOUTUBE_PROXY: "http://用户名:密码@代理IP:端口"
+     ```
+   - `docker compose up -d` 重启，只有 YouTube 走这个代理，其他站点不受影响。
+   - 想让所有站点都走代理就用 `YTDLP_PROXY`。
+3. 自检第一行的 `代理：…` 会显示当前是否生效（`YouTube 专用` / `全局` / `无`）。
 
 **服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严；抖音的签名请求专门针对机房 IP 设计。B站对机房 IP 的 412 风控偶尔连 buvid3/buvid4/b_nut 也拦——这时配置一份 B 站登录 cookies（含 `SESSDATA`）或国内出口代理，比任何自动手段都稳。YouTube 在机房 IP 会触发"确认你不是机器人"，程序会自动切到 `visionos`/`android_vr` 客户端（不需要 PO token）；X 的 GraphQL 接口被限流时会自动改用 syndication 接口。
 
