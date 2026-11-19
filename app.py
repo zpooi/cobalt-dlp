@@ -410,6 +410,11 @@ def explain_failure(lines, returncode):
         return "解析失败：站点可能改版，先更新 yt-dlp（docker compose exec savebox pip install -U yt-dlp）再试。"
     if "country" in low or "region" in low or "geo-restrict" in low:
         return "该内容有地区限制，服务器所在地区无法访问。"
+    if ("connect tunnel failed" in low or "proxyerror" in low
+            or "unable to connect to proxy" in low or "proxy connect" in low):
+        return ("代理连接失败：请确认 YOUTUBE_PROXY / YTDLP_PROXY 填的是代理地址"
+                "（形如 http://用户名:密码@主机:端口 或 socks5://主机:端口），"
+                "而不是服务商的 API / 订阅链接。若代理用 IP 白名单，先加白服务器出口 IP。")
     if ("timed out" in low or "timeout" in low or "name or service" in low
             or "connection" in low or "network" in low or "temporary failure" in low):
         return "网络连接失败或超时，稍后重试；持续失败可能是服务器网络问题。"
