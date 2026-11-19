@@ -35,7 +35,7 @@ docker compose logs -f
 
 浏览器打开 **`http://服务器IP:12000`**（记得在云安全组 / ufw 放行 12000）。
 
-> 宿主机端口默认 12000，可用环境变量 `HOST_PORT` 覆盖，例如 `HOST_PORT=12003 docker compose up -d`。
+> 端口在 `docker-compose.yml` 里，`ports: "12000:13000"` 左边 12000 是宿主机端口，可自行改。
 
 ## 不用 Docker（直接跑）
 
