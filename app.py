@@ -61,9 +61,6 @@ CLEANUP_INTERVAL = float(os.environ.get("CLEANUP_INTERVAL", "600"))
 MOBILE_SAFE = os.environ.get("MOBILE_SAFE", "1").lower() not in ("0", "false", "no", "off")
 # 转码时限制最大高度（例如 1080）；0 = 保持原分辨率。手机播放 4K 会卡，可设为 1080。
 TRANSCODE_MAX_HEIGHT = int(os.environ.get("TRANSCODE_MAX_HEIGHT", "0") or 0)
-# yt-dlp 的 PO Token provider（bgutil）地址，例如 http://bgutil-provider:4416。
-# 留空则不启用；docker-compose.yml 里已默认接好。
-POT_PROVIDER_URL = os.environ.get("POT_PROVIDER_URL", "").strip()
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -392,7 +389,7 @@ def explain_failure(lines, returncode):
         return "没有找到可下载的视频流：可能是图文/纯图片内容，或该站提取器暂时失效（可更新 yt-dlp）。"
     if "requested format is not available" in low or "format is not available" in low:
         return ("没有可用的下载格式：YouTube 在机房 IP 上常只返回受限流（SABR）。"
-                "程序已自动轮换客户端并尝试 PO Token；仍失败请确认 cookies/ 里的 YouTube cookies "
+                "程序已自动强制 IPv4 并轮换客户端；仍失败请确认 cookies/ 里的 YouTube cookies "
                 "确实是登录态（含 SID/LOGIN_INFO），或更换不被标记的出口 IP。")
     if "can't find any video" in low or "cannot find any video" in low:
         return ("页面里没找到视频数据：可能是会员/付费内容、地区限制，"
@@ -1018,17 +1015,7 @@ def yt_dlp_attempts(job):
     out = [("默认", fmt, [])]
     if host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com")):
         # 先强制 IPv4：GCP/部分 VPS 的 IPv6 段被 YouTube 整段降权，IPv4 往往就能过。
-        pot_args = []
-        if POT_PROVIDER_URL:
-            pot_args = ["--extractor-args",
-                        f"youtubepot-bgutilhttp:base_url={POT_PROVIDER_URL}"]
-        web_args = ["--force-ipv4"] + pot_args
-        if POT_PROVIDER_URL:
-            # web 客户端在有 cookies 时也会被要求 PO token；强制生成一次，
-            # 否则会只拿到 SABR 流，报 "Requested format is not available"。
-            web_args += ["--extractor-args", "youtube:fetch_pot=always"]
-        out[0] = ("默认（IPv4+PO Token）" if POT_PROVIDER_URL else "默认（IPv4）",
-                  fmt, web_args)
+        out[0] = ("默认（IPv4）", fmt, ["--force-ipv4"])
         # 再轮换客户端：visionos/android_vr/tv_downgraded/web_embedded 这几家
         # 不强制要 PO token，实测最抗机房 IP 的风控。
         for label, client in (
@@ -1042,7 +1029,7 @@ def yt_dlp_attempts(job):
         ):
             out.append((f"YouTube {label}", fmt,
                         ["--force-ipv4",
-                         "--extractor-args", f"youtube:player_client={client}"] + pot_args))
+                         "--extractor-args", f"youtube:player_client={client}"]))
     elif host.endswith(("x.com", "twitter.com")):
         # 机房 IP 上 GraphQL 接口可能被限流；syndication 接口不需要登录，
         # 在拿不到 guest token 时通常还能取到视频地址。

@@ -188,9 +188,6 @@ def main(argv):
     print(f"环境：yt-dlp {ytv.__version__} | JS 运行时：{'deno' if shutil.which('deno') else '无'}"
           f" | curl_cffi：{'有' if _has_curl_cffi() else '无'}"
           f" | YouTube cookies：{youtube_cookie_state()}")
-    pot = os.environ.get("POT_PROVIDER_URL")
-    if pot:
-        print(f"PO Token provider：{pot}")
     rows = []
     print("平台            结果   说明")
     print("-" * 78)
