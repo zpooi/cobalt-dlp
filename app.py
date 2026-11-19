@@ -375,9 +375,10 @@ def explain_failure(lines, returncode):
             or "not exist" in low or "not found" in low):
         return "视频不存在，或已被删除 / 设为不可见。"
     if "412" in low or "precondition failed" in low:
-        return ("目标站点风控拦截（HTTP 412）：多见于 B 站对机房 IP 的限制。"
-                "程序会自动补充 buvid3 访客 cookie；如果仍失败，请在浏览器登录后导出该站 cookies "
-                "放进 cookies/ 目录再试。")
+        return ("目标站点风控拦截（HTTP 412）：B 站对机房/海外 IP 限制很严。"
+                "程序已自动补 buvid3/buvid4/b_nut 并换浏览器 TLS 指纹重试；"
+                "仍失败时最有效的办法是在浏览器登录 B 站后导出 cookies（含 SESSDATA、buvid3）"
+                "放进 cookies/ 目录，或者给服务器配一个国内出口代理。")
     if "403" in low:
         return f"{who}拒绝了请求（HTTP 403），通常需要 cookies 或更换服务器出口网络。"
     if "404" in low:
@@ -860,22 +861,40 @@ def douyin_to_mp3(video_path, job):
     return out
 
 
-def _bilibili_buvid():
+def _bilibili_visitor_cookies():
+    """取一套 B 站访客 cookie：首页给 buvid3 + b_nut，SPI 再补 buvid4。
+
+    只带 buvid3 时，机房 IP 仍可能 412；buvid3 和 b_nut 是同一次访问下发的，
+    要成对使用。首页拿不到再退回 SPI 的 b_3/b_4。
+    """
+    cookies = {}
+    # 先访问首页：这里下发的一组 buvid3/b_nut 才是"浏览器一致"的
+    try:
+        for c in _fetch_visitor_cookies("https://www.bilibili.com/"):
+            if c.name in ("buvid3", "buvid4", "b_nut") and c.value:
+                cookies[c.name] = c.value
+    except Exception:  # noqa
+        pass
     try:
         req = urllib.request.Request("https://api.bilibili.com/x/frontend/finger/spi",
                                      headers={"User-Agent": UA_DESKTOP})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read() or b"{}")
         d = data.get("data") or {}
-        return d.get("b_3") or "", d.get("b_4") or ""
+        if d.get("b_3"):
+            cookies.setdefault("buvid3", d["b_3"])
+        if d.get("b_4"):
+            cookies.setdefault("buvid4", d["b_4"])
     except Exception:  # noqa
-        return "", ""
+        pass
+    return cookies
 
 
 def cookies_with_buvid(cookies_path, job_dir, job=None):
-    """B 站从机房 IP 访问常返回 412，需要 buvid3 访客 cookie。
+    """B 站从机房 IP 访问常返回 412，需要 buvid3/buvid4 访客 cookie。
 
-    用户没配 B 站 cookies 时，自动向 bilibili 要一对访客 ID 补进 cookies 文件。
+    用户没配 B 站 cookies 时，自动要一套访客 cookie 补进 cookies 文件；
+    已经有登录 cookies 的用户也补上 b_nut，少踩一次风控。
     """
     text = ""
     if cookies_path:
@@ -884,10 +903,16 @@ def cookies_with_buvid(cookies_path, job_dir, job=None):
                 text = fh.read()
         except OSError:
             text = ""
-    if "buvid3" in text:
+    has_buvid3 = bool(re.search(r"\tbuvid3\t", text))
+    has_nut = bool(re.search(r"\tb_nut\t", text))
+    if has_buvid3 and has_nut:
         return cookies_path
-    b3, b4 = _bilibili_buvid()
-    if not b3:
+    fresh = _bilibili_visitor_cookies()
+    if has_nut:
+        fresh.pop("b_nut", None)
+    # 只有 buvid3、没有 b_nut 时，那份 buvid3 多半是过期的（或者格式不对），
+    # 这里用新取的一套覆盖掉。
+    if not fresh:
         return cookies_path
     out = os.path.join(job_dir, "bili-cookies.temp")
     exp = int(time.time()) + 365 * 86400
@@ -897,10 +922,9 @@ def cookies_with_buvid(cookies_path, job_dir, job=None):
             if not text.endswith("\n"):
                 fh.write("\n")
         fh.write("# Netscape HTTP Cookie File\n")
-        fh.write(f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\tbuvid3\t{b3}\n")
-        if b4:
-            fh.write(f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\tbuvid4\t{b4}\n")
-    _job_note(job, "B站：已自动补充访客 cookie（buvid3/buvid4），用于绕过 412 风控")
+        for name, value in fresh.items():
+            fh.write(f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\t{name}\t{value}\n")
+    _job_note(job, "B站：已自动补充访客 cookie（buvid3/buvid4/b_nut），用于绕过 412 风控")
     return out
 
 
@@ -984,10 +1008,23 @@ def yt_dlp_attempts(job):
     host = _host_of(job["url"])
     out = [("默认", fmt, [])]
     if host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com")):
-        # 机房 IP 上 YouTube 常报 "Sign in to confirm you're not a bot"，
-        # 换个客户端往往就能过，不用 cookies。
-        out.append(("YouTube tv 客户端", fmt, ["--extractor-args", "youtube:player_client=tv"]))
-        out.append(("YouTube safari 客户端", fmt, ["--extractor-args", "youtube:player_client=web_safari"]))
+        # 机房 IP 上 YouTube 常报 "Sign in to confirm you're not a bot"。
+        # visionos / android_vr 这两个客户端既不需要 PO token，也不做登录校验，
+        # 实测能从机房 IP 拿到视频（visionos 还能给 1080p），所以放在前面；
+        # tv / web_safari 作为补充（它们的返回格式经常受 SABR 限制）。
+        for label, client in (
+            ("visionOS 客户端", "visionos"),
+            ("android_vr 客户端", "android_vr"),
+            ("tv 客户端", "tv"),
+            ("safari 客户端", "web_safari"),
+        ):
+            out.append((f"YouTube {label}", fmt,
+                        ["--extractor-args", f"youtube:player_client={client}"]))
+    elif host.endswith(("x.com", "twitter.com")):
+        # 机房 IP 上 GraphQL 接口可能被限流；syndication 接口不需要登录，
+        # 在拿不到 guest token 时通常还能取到视频地址。
+        out.append(("X syndication 接口", fmt,
+                    ["--extractor-args", "twitter:api=syndication"]))
     if job.get("quality") != "best":
         out.append(("最佳可用画质", QUALITY_FMT["best"], []))
     # 部分站点会拒绝 Python 的 TLS 指纹；装了 curl_cffi
@@ -1005,6 +1042,10 @@ _RETRYABLE = (
     "no video formats found", "format is not available", "timed out", "timeout",
     "temporary failure", "connection reset", "connection aborted", "connection refused",
     "http error 5", "http error 429", "too many requests", "unexpected_eof", "ssl",
+    # YouTube 换客户端后有时报这个，不是真的失败，继续试下一个客户端
+    "needs to be reloaded",
+    # B站 412 是风控：换浏览器 TLS 指纹再试一次（curl_cffi 可用时）
+    "http error 412", "precondition failed", "http error 403",
 )
 
 

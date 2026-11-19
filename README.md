@@ -78,15 +78,16 @@ cobalt-dlp/
 
 | 平台 | 状态 | 需要 cookies？ |
 |---|---|---|
-| B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 可用 | 默认不需要（自动补 buvid3）；1080P 以上需要登录 cookies |
+| B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 可用 | 默认自动补 buvid3/buvid4/b_nut；**机房/海外 IP 被 412 时**建议配登录 cookies（含 SESSDATA）或走国内代理；1080P 以上也需要登录 cookies |
 | 抖音（含 `v.douyin.com` 短链） | ✅ 内置下载器 | **必须**：带 `UIFID` 的 douyin cookies；图文作品暂不支持 |
 | 微博 / 今日头条 / 搜狐 / AcFun / CCTV | ✅ 可用 | 一般不需要 |
-| QQ音乐 / 网易云音乐 / 喜马拉雅 | ✅ 可用（选"仅音频"） | 不需要 |
+| 网易云音乐 / 喜马拉雅 | ✅ 可用（选"仅音频"） | 不需要 |
+| QQ音乐 | ⚠️ 部分歌曲需要登录 | VIP/付费/部分版权歌曲需要 cookies |
 | 虎牙（直播/回放） | ✅ 可用 | 不需要 |
 | 小红书（含 `xhslink.com` 短链） | ⚠️ 仅视频笔记 | **必须**：不配 cookies 会被登录墙拦下；图文笔记不支持 |
 | 西瓜视频 | ⚠️ 需要 cookies | 未登录时提取器直接要求 cookies |
 | YouTube | ✅ 可用 | 一般不需要（自动切客户端）；被判定"机器人"时需要 |
-| Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要 |
+| Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies |
 | SoundCloud / Pinterest | ✅ 可用 | 不需要 |
 | Facebook / Reddit / Vimeo 等 | ✅ yt-dlp 支持的都行 | 视内容 |
 | 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ 暂不支持 | yt-dlp 没有对应提取器 |
@@ -100,9 +101,10 @@ cobalt-dlp/
 **程序会在每个任务里自动做的事**（不用手动配置）：
 
 - **cookies 自动合并**：`cookies/` 下所有 `.txt`（Netscape 或 JSON 格式）按修改时间从旧到新合并，同站点的重复 cookie 以最新导出为准
-- **B站 412**：自动向 bilibili 要一对访客 ID（`buvid3`/`buvid4`）补进 cookies——机房 IP 不加这个必 412
+- **B站 412**：自动向 bilibili 要访客 cookie（`buvid3`/`buvid4`/`b_nut`）补进 cookies，并用浏览器 TLS 指纹重试——机房 IP 不加这个必 412
 - **小红书 / 微博**：没配 cookies 时自动去要首页下发的访客 cookie（`a1`/`SUB` 这类关键 cookie 登录才有）
-- **YouTube 机器人校验**：自动依次尝试默认 → `tv` 客户端 → `web_safari` 客户端，三种都失败才报错
+- **YouTube 机器人校验**：自动依次尝试默认 → `visionos` → `android_vr` → `tv` → `web_safari` 客户端（前两个不需要 PO token，机房 IP 最容易过），全失败才报错
+- **X（Twitter）限流**：GraphQL 接口被限流/拒绝时自动切到 syndication 接口再试
 - **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
 - **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试
 - **iOS 兼容兜底**：下载后统一用 ffprobe 复检，非 H.264/AAC 自动转码（见下文）
@@ -111,7 +113,7 @@ cobalt-dlp/
 
 **抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
 
-**服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严；抖音的签名请求专门针对机房 IP 设计，B站加了 buvid 后一般也能过。YouTube 在部分机房 IP 会触发"确认你不是机器人"，此时配 cookies 最稳。
+**服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严；抖音的签名请求专门针对机房 IP 设计。B站对机房 IP 的 412 风控偶尔连 buvid3/buvid4/b_nut 也拦——这时配置一份 B 站登录 cookies（含 `SESSDATA`）或国内出口代理，比任何自动手段都稳。YouTube 在机房 IP 会触发"确认你不是机器人"，程序会自动切到 `visionos`/`android_vr` 客户端（不需要 PO token）；X 的 GraphQL 接口被限流时会自动改用 syndication 接口。
 
 ### 逐平台自检
 
@@ -122,7 +124,7 @@ docker compose exec savebox python selftest.py              # 全部平台
 docker compose exec savebox python selftest.py B站 YouTube  # 只测几个
 ```
 
-脚本用 yt-dlp 各提取器自带的测试链接跑 `--simulate`（不下载），抖音则直接调内置下载器的接口，输出一张"平台 / 是否可用 / 失败原因"的表。失败的那行原因可以直接贴出来排查。
+脚本用 yt-dlp 各提取器自带的测试链接跑 `--simulate`（不下载），每个平台最多试 3 条链接（测试链接常常早已失效，只测一条会误判），抖音则直接调内置下载器的接口，输出一张"平台 / 是否可用 / 失败原因"的表。失败的那行原因可以直接贴出来排查。
 
 ## 文件保留（自动清理）
 

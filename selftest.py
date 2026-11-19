@@ -5,8 +5,9 @@
     docker compose exec savebox python selftest.py            # 全部平台
     docker compose exec savebox python selftest.py B站 YouTube  # 只测指定平台
 
-每个平台用 yt-dlp 自带测试链接跑一次 --simulate（不真正下载），
-抖音走项目内置下载器的接口（不需要视频文件）。
+每个平台用 yt-dlp 自带测试链接跑 --simulate（不真正下载），最多试 3 条
+链接（自带测试链接经常早就失效，只测一条会误判），抖音走项目内置下载器
+的接口（不需要视频文件）。
 """
 
 import os
@@ -57,14 +58,23 @@ def find_ie(keys):
     return None
 
 
-def test_url(ie):
+def test_urls(ie, limit=3):
+    """取前几个可用的自带测试链接。
+
+    单条测试链接经常早就失效（被删、账号注销、amplify 卡片域名过期），
+    只测第一条会把能用的平台误判成失败，所以按顺序试几条，成功一条即算通过。
+    """
+    out = []
     for t in getattr(ie, "_TESTS", None) or []:
         if t.get("skip") or t.get("only_matching"):
             continue
         u = t.get("url")
-        if isinstance(u, str) and u.startswith("http"):
-            return u
-    return None
+        if isinstance(u, str) and u.startswith("http") and ".onion" not in u:
+            if u not in out:
+                out.append(u)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def prepare_cookies(workdir):
@@ -139,11 +149,15 @@ def main(argv):
             if not ie:
                 ok, info = False, "yt-dlp 没有这个提取器"
             else:
-                url = test_url(ie)
-                if not url:
+                urls = test_urls(ie)
+                if not urls:
                     ok, info = None, "提取器没有自带测试链接，跳过"
                 else:
-                    ok, info = run_probe(url, cookies)
+                    ok, info = False, "没有可用的测试链接"
+                    for url in urls:
+                        ok, info = run_probe(url, cookies)
+                        if ok:
+                            break
         rows.append((name, ok, info))
         mark = "✅ 可用" if ok else ("❌ 失败" if ok is False else "⚠️ 跳过")
         print(f"{name:<14} {mark:<6} {info}")
