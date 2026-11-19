@@ -126,10 +126,12 @@ YTDLP = find_yt_dlp()
 
 QUALITY_FMT = {
     # label -> yt-dlp -f selector
-    "best": "bv*+ba/b",
-    "1080": "bv*[height<=1080]+ba/b[height<=1080]/b",
-    "720": "bv*[height<=720]+ba/b[height<=720]/b",
-    "480": "bv*[height<=480]+ba/b[height<=480]/b",
+    # 优先 avc1(H.264)+m4a 的 mp4 组合，iPhone/微信/相册能直接播放和保存；
+    # 拿不到再用通用组合兜底。最终统一 --merge-output-format mp4 转封装。
+    "best": "bv*[vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*+ba/b",
+    "1080": "bv*[height<=1080][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
+    "720": "bv*[height<=720][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]/b",
+    "480": "bv*[height<=480][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=480]+ba/b[height<=480]/b",
     "audio": "bestaudio/best",
 }
 
@@ -160,6 +162,13 @@ def run_job(job_id):
         "--no-color",
         "-o", outtmpl,
     ]
+    # 视频统一转封装成 mp4(iOS/微信/相册可直接播放和保存)；仅音频则转 mp3。
+    if job.get("quality") == "audio":
+        cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
+    else:
+        cmd += ["--merge-output-format", "mp4"]
+        # 若源是 webm/mkv 等，尽量无损重封装成苹果兼容的 mp4(H.264)。
+        cmd += ["--remux-video", "mp4"]
     if os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
         cmd += ["--cookies", COOKIES_FILE]
     cmd += [job["url"]]
@@ -367,13 +376,23 @@ class Handler(BaseHTTPRequestHandler):
         if not full.startswith(base + os.sep) or not os.path.isfile(full):
             return self._send_json({"error": "not found"}, 404)
         size = os.path.getsize(full)
+        low = full.lower()
+        # 明确、iOS 友好的 MIME；webm/mkv 这类 iOS 不认的容器也按 mp4 处理
         ctype = "application/octet-stream"
-        if full.lower().endswith((".mp4", ".m4v", ".webm", ".mkv")):
-            ctype = "video/mp4" if full.lower().endswith((".mp4", ".m4v")) else "video/webm"
-        elif full.lower().endswith((".mp3", ".m4a", ".opus", ".ogg")):
+        if low.endswith((".mp4", ".m4v", ".mkv", ".webm", ".mov")):
+            ctype = "video/mp4"
+        elif low.endswith((".mp3",)):
             ctype = "audio/mpeg"
-        elif full.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            ctype = "image/" + full.rsplit(".", 1)[-1].lower()
+        elif low.endswith((".m4a", ".aac")):
+            ctype = "audio/mp4"
+        elif low.endswith((".opus", ".ogg")):
+            ctype = "audio/ogg"
+        elif low.endswith((".jpg", ".jpeg")):
+            ctype = "image/jpeg"
+        elif low.endswith(".png"):
+            ctype = "image/png"
+        elif low.endswith(".webp"):
+            ctype = "image/webp"
 
         # support Range for video seeking
         rng = self.headers.get("Range")
@@ -403,7 +422,18 @@ class Handler(BaseHTTPRequestHandler):
         # let browser download with filename
         if parse_qs(urlparse(self.path).query).get("dl"):
             fname = parts[1]
-            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            # ASCII 安全文件名（iOS/微信对非 ASCII 名偶发"无法保存"）
+            ascii_name = re.sub(r"[^A-Za-z0-9._\-]+", "_", fname).strip("_") or "video"
+            ascii_name = ascii_name[:150]
+            # 保留原始（可能含中文）名字：filename= 用 ASCII，filename*= 用 UTF-8
+            from urllib.parse import quote
+            disp = ('attachment; filename="%s"; filename*=UTF-8\'\'%s'
+                    % (ascii_name, quote(fname)))
+            self.send_header("Content-Disposition", disp)
+        else:
+            # 内联播放，给 iOS 一个明确的 inline，避免被当成附件
+            self.send_header("Content-Disposition", "inline")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(full, "rb") as f:
             f.seek(start)
