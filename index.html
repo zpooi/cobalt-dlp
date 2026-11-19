@@ -176,7 +176,7 @@
 <div class="modal" id="modal">
   <div class="inner">
     <div class="mhead"><div class="t" id="mTitle"></div><button class="close" id="mClose">×</button></div>
-    <video id="mVideo" controls playsinline></video>
+    <video id="mVideo" controls playsinline webkit-playsinline x5-playsinline preload="metadata"></video>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -206,8 +206,10 @@ function remainText(ms){
   if(m>0) return `${m}分钟后清理`;
   return `${s}秒后清理`;
 }
-function isVideo(name){return /\.(mp4|m4v|webm|mkv)$/i.test(name);}
+function isVideo(name){return /\.(mp4|m4v|webm|mkv|mov)$/i.test(name);}
 function isAudio(name){return /\.(mp3|m4a|opus|ogg)$/i.test(name);}
+// 逐段编码，标题里的 # ? & 之类的字符不会把链接截断
+function fileUrl(rel){return "/files/"+String(rel).split("/").map(encodeURIComponent).join("/");}
 
 async function health(){
   try{
@@ -252,10 +254,9 @@ function jobCard(job){
   const thumb = el("div","thumb");
   const file = (job.files&&job.files[0]) || null;
   if(job.status==="done" && file && isVideo(file.name)){
-    const fname = encodeURI(file.rel);
-    thumb.innerHTML = `<video src="/files/${fname}#t=0.1" muted preload="metadata"></video>`;
+    thumb.innerHTML = `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline></video>`;
   }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
-    thumb.innerHTML = `<img src="/files/${encodeURI(file.rel)}" alt="">`;
+    thumb.innerHTML = `<img src="${fileUrl(file.rel)}" alt="">`;
   }else if(job.status==="done" && file && isAudio(file.name)){
     thumb.innerHTML = `<svg class="ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
   }else{
@@ -300,6 +301,12 @@ function jobCard(job){
   if(job.status==="error" && job.error){
     const e = el("div","err-msg"); e.textContent = job.error; meta.appendChild(e);
   }
+  // 后端的转码/兼容性提示（"已是 H.264，无需转码" / "转码为 H.264/AAC：视频编码是 vp9…"）
+  const note = (job.notes||[]).slice(-1)[0];
+  if(note && job.status!=="error"){
+    const n = el("div","url"); n.textContent = "· " + note; n.title = note;
+    meta.appendChild(n);
+  }
   card.appendChild(meta);
 
   // progress width
@@ -311,8 +318,8 @@ function jobCard(job){
   if(job.status==="done" && file){
     const play = el("button","ico-btn play"); play.title="播放";
     play.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
-    play.onclick = ()=>openPlayer(file.name, "/files/"+encodeURI(file.rel));
-    const dl = el("a","ico-btn"); dl.title="下载"; dl.href="/files/"+encodeURI(file.rel)+"?dl=1"; dl.download=file.name;
+    play.onclick = ()=>openPlayer(file.name, fileUrl(file.rel));
+    const dl = el("a","ico-btn"); dl.title="下载"; dl.href=fileUrl(file.rel)+"?dl=1"; dl.download=file.name;
     dl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`;
     if(isAudio(file.name)){ actions.appendChild(dl); }
     else { actions.appendChild(play); actions.appendChild(dl); }
