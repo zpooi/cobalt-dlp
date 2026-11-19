@@ -42,7 +42,12 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.join(HERE, "downloads"))
 COOKIES_FILE = os.environ.get("COOKIES_FILE", os.path.join(HERE, "cookies.txt"))
 # 目录里的所有 *.txt 都会被自动合并成一个 cookies 文件：抖音导出成
 # www.douyin_com_cookies.txt、B站导出成 bilibili.txt 各放一份就行，不用手动拼接。
-COOKIES_DIR = os.environ.get("COOKIES_DIR") or os.path.dirname(COOKIES_FILE) or HERE
+# 本地直接跑时 COOKIES_FILE 和代码在同一目录，不能把整个项目目录当 cookies 目录
+# （会把 requirements.txt 也读进来），默认用 ./cookies。
+_default_cookie_dir = os.path.dirname(COOKIES_FILE) or HERE
+if os.path.abspath(_default_cookie_dir) == os.path.abspath(HERE):
+    _default_cookie_dir = os.path.join(HERE, "cookies")
+COOKIES_DIR = os.environ.get("COOKIES_DIR") or _default_cookie_dir
 COOKIES_MERGED = os.path.join(tempfile.gettempdir(), "cobalt-dlp-cookies.txt")
 COOKIES_LOCK = threading.Lock()
 PORT = int(os.environ.get("PORT", "13000"))
@@ -76,6 +81,16 @@ def purge_job_files(job_id):
         pass
 
 
+def _looks_like_cookies(path):
+    """粗筛：Netscape 格式有制表符，JSON 导出以 [ 或 { 开头。"""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    return b"\t" in head or head.lstrip().startswith((b"[", b"{"))
+
+
 def cookie_files():
     """All non-empty cookie files we should feed to yt-dlp."""
     found = []
@@ -85,7 +100,8 @@ def cookie_files():
                 continue
             path = os.path.join(COOKIES_DIR, name)
             try:
-                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                if (os.path.isfile(path) and os.path.getsize(path) > 0
+                        and _looks_like_cookies(path)):
                     found.append(os.path.abspath(path))
             except OSError:
                 pass
@@ -313,10 +329,16 @@ def explain_failure(lines, returncode):
 
     if "fresh cookies" in low or "not necessarily logged in" in low:
         return (f"{who}要求 cookies（未登录状态的也行）。"
-                "把从浏览器导出的 cookies 放进服务器 cookies/cookies.txt 后重新点下载即可，无需重启。")
+                "把从浏览器导出的 cookies 放进服务器 cookies/ 目录后重新下载即可，无需重启。")
+    if ("sign in to confirm" in low or "not a bot" in low
+            or ("confirm" in low and "bot" in low)):
+        return ("YouTube 把服务器 IP 当成机器人了（已自动换过 tv / safari 客户端）。"
+                "在 cookies/ 目录放一份登录后的 YouTube cookies 成功率最高；仍不行就需要换出口 IP。")
+    if "429" in low or "too many requests" in low or "rate limit" in low or "rate-limit" in low:
+        return f"{who}限流了：等几分钟再试。配置该站 cookies 可以降低触发限流的概率。"
     if ("sign in" in low or "login" in low or "log in" in low
             or "cookies" in low or "authenticat" in low):
-        return (f"{who}需要登录信息：请在 cookies/cookies.txt 里配置该站 cookies 后重试。")
+        return (f"{who}需要登录信息：请在 cookies/ 目录里配置该站 cookies 后重试。")
     if "private" in low:
         return "内容是私密的，需要作者授权或配置 cookies。"
     if "unsupported url" in low:
@@ -334,6 +356,18 @@ def explain_failure(lines, returncode):
         return f"{who}拒绝了请求（HTTP 403），通常需要 cookies 或更换服务器出口网络。"
     if "404" in low:
         return "链接失效（HTTP 404）。"
+    if "no video formats found" in low:
+        return "没有找到可下载的视频流：可能是图文/纯图片内容，或该站提取器暂时失效（可更新 yt-dlp）。"
+    if "can't find any video" in low or "cannot find any video" in low:
+        return ("页面里没找到视频数据：可能是会员/付费内容、地区限制，"
+                "或 yt-dlp 的提取器失效（更新 yt-dlp 后再试）。")
+    if "ssr_hydrated_data" in low or "ssr data" in low:
+        return "站点页面结构变了，yt-dlp 暂时解析不了这个站；更新 yt-dlp 后再试。"
+    if "unable to extract room id" in low:
+        return "直播间解析失败：链接可能已过期，或该站改了接口。"
+    if "unexpected_eof" in low or "ssl:" in low or "ssl_connect" in low:
+        return ("和站点建立连接被拒绝（机房 IP 常拦 Python 的 TLS 指纹）。"
+                "已自动尝试浏览器 TLS 指纹；仍失败请换出口网络或配置该站 cookies。")
     if "unable to extract" in low:
         return "解析失败：站点可能改版，先更新 yt-dlp（docker compose exec savebox pip install -U yt-dlp）再试。"
     if "country" in low or "region" in low or "geo-restrict" in low:
@@ -844,6 +878,181 @@ def cookies_with_buvid(cookies_path, job_dir, job=None):
     return out
 
 
+# 有些站点要"访客 cookie"才肯放行（小红书 a1、微博 SUB）。第一次访问首页就会下发，
+# 用户没配 cookies 时自动去要一份，不用手动导出。
+VISITOR_SEEDS = {
+    "xiaohongshu.com": ("https://www.xiaohongshu.com/", "a1"),
+    "weibo.com": ("https://weibo.com/", "SUB"),
+    "weibo.cn": ("https://m.weibo.cn/", "SUB"),
+}
+
+
+def _fetch_visitor_cookies(seed_url):
+    import http.cookiejar
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    req = urllib.request.Request(seed_url, headers={
+        "User-Agent": UA_DESKTOP,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+    with opener.open(req, timeout=15) as r:
+        r.read(4096)
+    return [c for c in jar if c.name]
+
+
+def cookies_with_visitor(host, cookies_path, job_dir, job=None):
+    match = next(((s, seed, key) for s, (seed, key) in VISITOR_SEEDS.items()
+                  if host.endswith(s)), None)
+    if not match:
+        return cookies_path
+    site, seed_url, key = match
+    text = ""
+    if cookies_path:
+        try:
+            with open(cookies_path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+    if key and re.search(rf"\t{re.escape(key)}\t", text):
+        return cookies_path
+    try:
+        items = _fetch_visitor_cookies(seed_url)
+    except Exception:  # noqa
+        return cookies_path
+    existing = set()
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) >= 7:
+            existing.add((f[0].lstrip("."), f[5]))
+    fresh = [c for c in items
+             if (c.domain or "").lstrip(".").endswith(site)
+             and ((c.domain or "").lstrip("."), c.name) not in existing]
+    if not fresh:
+        return cookies_path
+    out = os.path.join(job_dir, "visitor-cookies.temp")
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        if text:
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+        fh.write("# Netscape HTTP Cookie File\n")
+        for c in fresh:
+            value = str(c.value or "").replace("\t", "").replace("\n", "").replace("\r", "")
+            fh.write(f"{c.domain or '.' + site}\tTRUE\t/\tFALSE\t{int(c.expires or 0)}\t"
+                     f"{c.name}\t{value}\n")
+    _job_note(job, f"{site}：已自动补充访客 cookie（{len(fresh)} 个）")
+    return out
+
+
+def _host_of(url):
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except Exception:  # noqa
+        return ""
+
+
+def yt_dlp_attempts(job):
+    """按顺序尝试的 (说明, -f 选择器, 额外参数)。"""
+    fmt = QUALITY_FMT.get(job.get("quality", "best"), QUALITY_FMT["best"])
+    host = _host_of(job["url"])
+    out = [("默认", fmt, [])]
+    if host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com")):
+        # 机房 IP 上 YouTube 常报 "Sign in to confirm you're not a bot"，
+        # 换个客户端往往就能过，不用 cookies。
+        out.append(("YouTube tv 客户端", fmt, ["--extractor-args", "youtube:player_client=tv"]))
+        out.append(("YouTube safari 客户端", fmt, ["--extractor-args", "youtube:player_client=web_safari"]))
+    if job.get("quality") != "best":
+        out.append(("最佳可用画质", QUALITY_FMT["best"], []))
+    # 部分站点（优酷、爱奇艺等）会拒绝 Python 的 TLS 指纹；装了 curl_cffi
+    # 就用浏览器的 TLS 指纹再试一次。
+    try:
+        import curl_cffi  # noqa: F401
+        out.append(("浏览器 TLS 指纹", fmt, ["--impersonate", "chrome"]))
+    except Exception:  # noqa
+        pass
+    return out
+
+
+_RETRYABLE = (
+    "sign in to confirm", "not a bot", "requested format is not available",
+    "no video formats found", "format is not available", "timed out", "timeout",
+    "temporary failure", "connection reset", "connection aborted", "connection refused",
+    "http error 5", "http error 429", "too many requests", "unexpected_eof", "ssl",
+)
+
+
+def _stream_ytdlp(cmd, job):
+    tail = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+    try:
+        for line in proc.stdout:  # type: ignore
+            line = line.rstrip("\n")
+            tail.append(line)
+            del tail[:-40]
+            m = re.search(r"\[download\]\s+([\d.]+)%", line)
+            if m:
+                with JOBS_LOCK:
+                    job["progress"] = float(m.group(1))
+            if "Merging formats" in line or "Extracting audio" in line:
+                with JOBS_LOCK:
+                    job["phase"] = "merging"
+        proc.wait()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:  # noqa
+            pass
+        raise
+    return proc.returncode, tail
+
+
+def run_ytdlp(job, job_dir):
+    """跑 yt-dlp；失败时按平台策略（客户端切换 / 画质兜底）重试一次。"""
+    host = _host_of(job["url"])
+    common = [
+        "--no-playlist", "--no-overwrites", "--restrict-filenames",
+        "--newline", "--no-color",
+        "--retries", "5", "--fragment-retries", "10",
+        "--extractor-retries", "3", "--socket-timeout", "20",
+        "-o", os.path.join(job_dir, "%(title).80s.%(ext)s"),
+    ]
+    # 视频统一成 mp4；H.264 兼容性由下载后的 ensure_apple_playable() 兜底转码保证。
+    if job.get("quality") == "audio":
+        common += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
+    else:
+        common += ["--merge-output-format", "mp4"]
+
+    try:
+        cookies = merged_cookies_path()
+    except Exception as e:  # noqa
+        cookies = None
+        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
+    cookies = cookies_with_visitor(host, cookies, job_dir, job)
+    if "bilibili.com" in host:
+        cookies = cookies_with_buvid(cookies, job_dir, job)
+    if cookies:
+        common += ["--cookies", cookies]
+
+    attempts = yt_dlp_attempts(job)
+    rc, tail = 0, []
+    for i, (label, fmt, extra) in enumerate(attempts):
+        if i:
+            _job_note(job, f"换策略重试：{label}")
+            with JOBS_LOCK:
+                job["progress"] = 0.0
+                job["phase"] = "downloading"
+        cmd = YTDLP + ["-f", fmt] + extra + common + [job["url"]]
+        rc, tail = _stream_ytdlp(cmd, job)
+        if rc == 0:
+            return rc, tail
+        low = "\n".join(tail).lower()
+        if i + 1 >= len(attempts) or not any(k in low for k in _RETRYABLE):
+            break
+    return rc, tail
+
+
 def douyin_download(job, job_dir, video_id):
     """下载抖音视频/音频，返回产出的文件路径。"""
     try:
@@ -900,57 +1109,13 @@ def run_job(job_id):
             _job_failed(job, f"抖音下载出错：{e}", tail)
             return
     else:
-        fmt = QUALITY_FMT.get(job.get("quality", "best"), QUALITY_FMT["best"])
-        outtmpl = os.path.join(job_dir, "%(title).80s.%(ext)s")
-
-        cmd = YTDLP + [
-            "-f", fmt,
-            "--no-playlist",
-            "--no-overwrites",
-            "--restrict-filenames",
-            "--newline",
-            "--no-color",
-            "-o", outtmpl,
-        ]
-        # 视频统一成 mp4；H.264 兼容性由下载后的 ensure_apple_playable() 兜底转码保证。
-        if job.get("quality") == "audio":
-            cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
-        else:
-            cmd += ["--merge-output-format", "mp4"]
         try:
-            cookies = merged_cookies_path()
-        except Exception as e:  # noqa
-            cookies = None
-            _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
-        if "bilibili.com" in (urlparse(job["url"]).hostname or "").lower():
-            cookies = cookies_with_buvid(cookies, job_dir, job)
-        if cookies:
-            cmd += ["--cookies", cookies]
-        cmd += [job["url"]]
-
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
-        try:
-            for line in proc.stdout:  # type: ignore
-                line = line.rstrip("\n")
-                tail.append(line)
-                if len(tail) > 40:
-                    tail.pop(0)
-                m = re.search(r"\[download\]\s+([\d.]+)%", line)
-                if m:
-                    with JOBS_LOCK:
-                        job["progress"] = float(m.group(1))
-                # merge/extract stage
-                if "Merging formats" in line or "Extracting audio" in line:
-                    with JOBS_LOCK:
-                        job["phase"] = "merging"
-            proc.wait()
+            rc, tail = run_ytdlp(job, job_dir)
         except Exception as e:  # noqa
             _job_failed(job, str(e), tail)
             return
-
-        if proc.returncode != 0:
-            _job_failed(job, explain_failure(tail, proc.returncode), tail)
+        if rc != 0:
+            _job_failed(job, explain_failure(tail, rc), tail)
             return
 
     # collect produced files (skip .part / .ytdl)

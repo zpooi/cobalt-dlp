@@ -65,6 +65,7 @@ cookies 是 Netscape 格式的文本文件（浏览器扩展导出的就是）�
 cobalt-dlp/
 ├── app.py                # 后端（HTTP 服务 + 任务队列 + yt-dlp 调用）
 ├── index.html            # 前端页面
+├── selftest.py           # 逐平台自检脚本
 ├── requirements.txt      # yt-dlp
 ├── Dockerfile
 ├── docker-compose.yml
@@ -73,23 +74,52 @@ cobalt-dlp/
 └── cookies/              # 放 cookies（目录里所有 *.txt 自动合并）
 ```
 
-## 国内平台说明
+## 各平台支持与自动适配
 
-| 平台 | 情况 |
-|---|---|
-| B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 开箱可用；1080P 以上需要登录 cookies |
-| 抖音（含 `v.douyin.com` 短链） | ✅ 内置下载器；需要 `cookies/` 里有一份**带 UIFID 的抖音 cookies**（浏览器打开 douyin.com 后导出即可，不用登录）。图文作品暂不支持 |
-| 小红书（含 `xhslink.com` 短链） | ⚠️ 建议配 cookies（未登录时常被限制） |
-| 微博 / 优酷 / 爱奇艺 / 西瓜视频 / 今日头条 / 搜狐 / AcFun / 知乎 / CCTV | ✅ 直接可用 |
-| QQ音乐 / 网易云音乐 / 喜马拉雅 | ✅ 直接可用（选"仅音频"） |
-| 虎牙 / 斗鱼 直播与回放 | ✅ 直接可用 |
-| 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ yt-dlp 暂不支持 |
+| 平台 | 状态 | 需要 cookies？ |
+|---|---|---|
+| B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 可用 | 默认不需要（自动补 buvid3）；1080P 以上需要登录 cookies |
+| 抖音（含 `v.douyin.com` 短链） | ✅ 内置下载器 | **必须**：带 `UIFID` 的 douyin cookies；图文作品暂不支持 |
+| 微博 / 今日头条 / 搜狐 / AcFun / CCTV | ✅ 可用 | 一般不需要 |
+| QQ音乐 / 网易云音乐 / 喜马拉雅 | ✅ 可用（选"仅音频"） | 不需要 |
+| 虎牙（直播/回放） | ✅ 可用 | 不需要 |
+| 小红书（含 `xhslink.com` 短链） | ⚠️ 仅视频笔记 | 建议配 cookies；图文笔记不支持 |
+| 优酷 / 爱奇艺 / 西瓜视频 / 斗鱼 | ⚠️ 视内容 | yt-dlp 提取器对部分内容失效；失败时页面会说明原因，建议配 cookies |
+| 知乎 | ⚠️ 视内容 | yt-dlp 无自带测试链接，未验证 |
+| YouTube | ✅ 可用 | 一般不需要（自动切客户端）；被判定"机器人"时需要 |
+| Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要 |
+| SoundCloud / Pinterest | ✅ 可用 | 不需要 |
+| Facebook / Reddit / Vimeo 等 | ✅ yt-dlp 支持的都行 | 视内容 |
+| 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ 暂不支持 | — |
 
-**关于 cookies**：`cookies/` 目录里可以放**任意多个** `.txt` 导出文件，程序在每次任务开始时把它们合并成一份（去重、保留 `#HttpOnly_` 行），所以按站分开存就行，不需要手动拼接。替换或新增文件后直接重新点下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
+> 表里的 ✅/⚠️ 是通过 `selftest.py` 用 yt-dlp **自带测试链接**跑出来的结果。测试链接可能过期，所以 ⚠️ 不代表真实链接一定失败；遇到失败时看页面给的原因。
 
-**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID` 这个 cookie；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
+**程序会在每个任务里自动做的事**（不用手动配置）：
 
-**服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严，这类站点如果报错，先确认 cookies 已配置；抖音的签名请求专门针对机房 IP 设计，理论上不受影响，但仍以实测为准。B站绝大多数视频海外可下，个别番剧有地区限制。
+- **cookies 自动合并**：`cookies/` 下所有 `.txt`（Netscape 或 JSON 格式）按修改时间从旧到新合并，同站点的重复 cookie 以最新导出为准
+- **B站 412**：自动向 bilibili 要一对访客 ID（`buvid3`/`buvid4`）补进 cookies——机房 IP 不加这个必 412
+- **小红书 / 微博**：没配 cookies 时自动去要首页下发的访客 cookie（`a1`/`SUB` 这类关键 cookie 登录才有）
+- **YouTube 机器人校验**：自动依次尝试默认 → `tv` 客户端 → `web_safari` 客户端，三种都失败才报错
+- **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
+- **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试
+- **iOS 兼容兜底**：下载后统一用 ffprobe 复检，非 H.264/AAC 自动转码（见下文）
+
+**关于 cookies**：按站分开存成多个文件最省事（`www.douyin_com_cookies.txt`、`bilibili.txt`…），替换或新增后直接重新下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
+
+**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
+
+**服务器在海外的影响**：抖音、小红书对非中国大陆 IP 限制较严；抖音的签名请求专门针对机房 IP 设计，B站加了 buvid 后一般也能过。YouTube 在部分机房 IP 会触发"确认你不是机器人"，此时配 cookies 最稳。
+
+### 逐平台自检
+
+部署后想确认每个站现在能不能用：
+
+```bash
+docker compose exec savebox python selftest.py              # 全部平台
+docker compose exec savebox python selftest.py B站 YouTube  # 只测几个
+```
+
+脚本用 yt-dlp 各提取器自带的测试链接跑 `--simulate`（不下载），抖音则直接调内置下载器的接口，输出一张"平台 / 是否可用 / 失败原因"的表。失败的那行原因可以直接贴出来排查。
 
 ## 文件保留（自动清理）
 
