@@ -5,7 +5,8 @@ services:
     container_name: savebox
     restart: unless-stopped
     ports:
-      - "12003:13000"          # 浏览器访问 http://服务器IP:12003
+      # 宿主机端口可用环境变量 HOST_PORT 覆盖（默认 12000）
+      - "${HOST_PORT:-12000}:13000"   # 浏览器访问 http://服务器IP:12000
     environment:
       PORT: "13000"
       HOST: "0.0.0.0"
