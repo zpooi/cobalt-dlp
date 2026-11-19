@@ -298,6 +298,32 @@ EXTRACTOR_NAMES = {
     "facebook": "Facebook", "reddit": "Reddit",
 }
 
+# 已从支持列表移除的平台：yt-dlp 提取器对所有自带测试链接都失败，
+# 或根本无法验证。这里提前拦下，直接给出说明，而不是让用户等一轮
+# yt-dlp 跑完再看到一句看不懂的报错。
+REMOVED_PLATFORMS = (
+    (re.compile(r"(^|\.)youku\.com$"),
+     "优酷已不再支持：yt-dlp 的优酷提取器会被站点拦截（SSL 握手失败），"
+     "自带的测试链接全部解析不了，已从支持列表移除。"),
+    (re.compile(r"(^|\.)iqiyi\.com$"),
+     "爱奇艺已不再支持：yt-dlp 的提取器对自带的测试链接全部报“找不到视频”，"
+     "已从支持列表移除。"),
+    (re.compile(r"(^|\.)douyu\.com$"),
+     "斗鱼已不再支持：yt-dlp 的提取器无法解析房间信息（Unable to extract room id），"
+     "已从支持列表移除。"),
+    (re.compile(r"(^|\.)zhihu\.com$"),
+     "知乎已不再支持：yt-dlp 没有可用的测试链接，视频还需要登录/付费，"
+     "无法稳定下载，已从支持列表移除。"),
+)
+
+
+def removed_platform_message(url):
+    host = _host_of(url)
+    for pattern, message in REMOVED_PLATFORMS:
+        if pattern.search(host):
+            return message
+    return ""
+
 
 def explain_failure(lines, returncode):
     """把 yt-dlp 的报错尾巴翻译成一句能照着做的中文。
@@ -964,7 +990,7 @@ def yt_dlp_attempts(job):
         out.append(("YouTube safari 客户端", fmt, ["--extractor-args", "youtube:player_client=web_safari"]))
     if job.get("quality") != "best":
         out.append(("最佳可用画质", QUALITY_FMT["best"], []))
-    # 部分站点（优酷、爱奇艺等）会拒绝 Python 的 TLS 指纹；装了 curl_cffi
+    # 部分站点会拒绝 Python 的 TLS 指纹；装了 curl_cffi
     # 就用浏览器的 TLS 指纹再试一次。
     try:
         import curl_cffi  # noqa: F401
@@ -1097,6 +1123,10 @@ def run_job(job_id):
         job["updated"] = now_ms()
 
     tail = []
+    removed = removed_platform_message(job["url"])
+    if removed:
+        _job_failed(job, removed, tail)
+        return
     douyin_id = douyin_video_id(job["url"]) if DOUYIN_HOST_RE.match(job["url"]) else ""
     if douyin_id:
         # 抖音走自带下载器：yt-dlp 现在拿不到签名，必然 403

@@ -8,7 +8,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# 可选依赖：yt-dlp 用它模拟浏览器的 TLS 指纹（优酷/爱奇艺等站会拦 Python 的握手）。
+# 可选依赖：yt-dlp 用它模拟浏览器的 TLS 指纹（部分站点会拦 Python 的握手）。
 # 装不上也不影响构建，程序会自动跳过这个重试策略。
 RUN pip install --no-cache-dir curl_cffi || true
 
