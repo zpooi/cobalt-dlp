@@ -27,7 +27,9 @@ mkdir -p cookies
 
 # 3. 启动
 docker compose up -d --build
-# 会启动两个容器：savebox（主程序）+ bgutil-provider（YouTube PO Token）
+
+# 如果 YouTube 报 "Requested format is not available"，再加上 PO Token 服务：
+# docker compose -f docker-compose.yml -f docker-compose.pot.yml up -d --build
 
 # 4. 查看
 docker compose logs -f
@@ -74,6 +76,7 @@ cobalt-dlp/
 ├── requirements.txt      # yt-dlp
 ├── Dockerfile
 ├── docker-compose.yml
+├── docker-compose.pot.yml # 可选：YouTube PO Token 服务
 ├── run.sh                # 非 Docker 启动
 ├── downloads/            # 下载的文件（Docker 挂载到宿主机）
 └── cookies/              # 放 cookies（目录里所有 *.txt 自动合并）
@@ -110,7 +113,7 @@ cobalt-dlp/
 - **小红书 / 微博**：没配 cookies 时自动去要首页下发的访客 cookie（`a1`/`SUB` 这类关键 cookie 登录才有）
 - **YouTube 机器人校验**：先强制走 IPv4（GCP 等 VPS 的 IPv6 段常被 YouTube 整段降权），再依次尝试默认 → `visionos` → `android_vr` → `tv_downgraded` → `web_embedded` → `mweb` → `tv` → `web_safari` 客户端，全失败才报错
 - **YouTube JS 挑战**：镜像内置 Deno（yt-dlp 2026 需要的 JS 运行时），用来解 nsig、少踩"格式缺失/机器人"
-- **YouTube PO Token**：docker-compose 自带 `bgutil-provider` 服务，Web 客户端需要 PO Token 时自动生成，避免"只返回受限格式"
+- **YouTube PO Token**：可选启用 `docker-compose.pot.yml` 里的 `bgutil-provider` 服务，Web 客户端需要 PO Token 时自动生成，避免"只返回受限格式"
 - **X（Twitter）限流**：GraphQL 接口被限流/拒绝时自动切到 syndication 接口再试
 - **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
 - **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试

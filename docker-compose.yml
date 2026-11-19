@@ -5,7 +5,7 @@ services:
     container_name: savebox
     restart: unless-stopped
     ports:
-      - "12000:13000"          # 浏览器访问 http://服务器IP:12000
+      - "12000:13000"          # 浏览器访问 http://服务器IP:12003
     environment:
       PORT: "13000"
       HOST: "0.0.0.0"
@@ -15,20 +15,6 @@ services:
       CLEANUP_INTERVAL: "600"    # 后台清理扫描间隔(秒)
       MOBILE_SAFE: "1"           # 1=强制转码 H.264/AAC 的 mp4(iOS/微信可播放)，0=关闭
       TRANSCODE_MAX_HEIGHT: "0"  # 转码时限制最大高度，0=保持原分辨率；手机流量/性能吃紧可设 1080
-      POT_PROVIDER_URL: "http://bgutil-provider:4416"  # YouTube PO Token provider(见下方服务)
     volumes:
       - ./downloads:/downloads          # 下载的文件存这里(宿主机可见)
       - ./cookies:/cookies              # 放 cookies.txt 到这里即可支持登录内容
-    depends_on:
-      - bgutil-provider
-
-  # 生成 YouTube 的 PO Token。机房/海外 IP 上 YouTube 常要求这个，
-  # 否则会只返回受限格式（Requested format is not available）。
-  bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:latest
-    container_name: bgutil-provider
-    restart: unless-stopped
-    init: true
-    # 只在 compose 内部网络暴露，不映射到宿主机端口
-    expose:
-      - "4416"
