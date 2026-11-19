@@ -9,6 +9,7 @@
 - 清晰度可选：最佳 / 1080p / 720p / 480p / 仅音频
 - 实时进度条、任务列表、失败原因提示
 - **文件只保留 1 天**：下载完成的文件在服务器保留 24 小时，到期由后台自动删除，不会长期占用服务器磁盘（可配置）
+- **手机可直接播放/保存**：视频统一下载为 mp4，并自动转码为 **H.264 + AAC**（iPhone/Safari/微信/相册原生支持），避免"该格式的视频无法保存"或黑屏
 - **支持 cookies**（需登录的内容、避免 IG/YT 限流）
 - 纯 Python 标准库 + yt-dlp，无重依赖
 
@@ -84,7 +85,8 @@ environment:
   RETENTION_HOURS: "24"    # 改成 12 就是保留 12 小时，0 = 永久
 ```
 
-## 常见问题- **下载失败 "login required" / "rate-limit"**：配置 cookies（见上）。
+## 常见问题
+- **手机提示"该格式的视频无法保存" / 网页/手机播放黑屏**：本项目下载后会检查编码，非 H.264/AAC 的会自动用 ffmpeg 转码成手机兼容的 mp4（需装好 ffmpeg；`MOBILE_SAFE=0` 可关闭）。转码需要一点时间，任务列表会显示"转码中…"。**旧文件不会自动重转，请重新下载一次**。- **下载失败 "login required" / "rate-limit"**：配置 cookies（见上）。
 - **下载失败 "unable to extract"**：目标站改版或链接非公开，先更新 yt-dlp：`docker compose exec savebox pip install -U yt-dlp` 后 `docker compose restart`。
 - **清晰度没有 1080p**：源本身最高就那么多；选"最佳画质"即可。
 - **文件太大/带宽**：下载存服务器磁盘，注意磁盘空间（`downloads/` 可定期清理）。

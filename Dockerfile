@@ -16,7 +16,8 @@ ENV PORT=13000 \
     DOWNLOAD_DIR=/downloads \
     COOKIES_FILE=/cookies/cookies.txt \
     RETENTION_HOURS=24 \
-    CLEANUP_INTERVAL=600
+    CLEANUP_INTERVAL=600 \
+    MOBILE_SAFE=1
 
 RUN mkdir -p /downloads /cookies
 

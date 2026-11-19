@@ -13,6 +13,7 @@ services:
       COOKIES_FILE: "/cookies/cookies.txt"
       RETENTION_HOURS: "24"      # 文件保留小时数，默认 24 小时(1 天)后自动删除
       CLEANUP_INTERVAL: "600"    # 后台清理扫描间隔(秒)
+      MOBILE_SAFE: "1"           # 1=强制转码 H.264/AAC 的 mp4(iOS/微信可播放)，0=关闭
     volumes:
       - ./downloads:/downloads          # 下载的文件存这里(宿主机可见)
       - ./cookies:/cookies              # 放 cookies.txt 到这里即可支持登录内容

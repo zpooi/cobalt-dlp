@@ -278,7 +278,8 @@ function jobCard(job){
   badge.textContent = label; sl.appendChild(badge);
 
   if(job.status==="running"){
-    const p = el("span"); p.textContent = (job.phase==="merging"?"合并中…":`${Math.round(job.progress||0)}%`);
+    const p = el("span");
+    p.textContent = job.phase==="converting" ? "转码中…" : (job.phase==="merging" ? "合并中…" : `${Math.round(job.progress||0)}%`);
     sl.appendChild(p);
   }
   if(job.status==="done" && file){

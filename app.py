@@ -43,6 +43,8 @@ MAX_JOBS = int(os.environ.get("MAX_JOBS", "200"))
 RETENTION_HOURS = float(os.environ.get("RETENTION_HOURS", "24"))
 # 清理线程的扫描间隔（秒）。默认 10 分钟扫一次。
 CLEANUP_INTERVAL = float(os.environ.get("CLEANUP_INTERVAL", "600"))
+# 是否强制把视频转码成 H.264/AAC 的 mp4（iOS/微信/相册兼容）。默认开启。
+MOBILE_SAFE = os.environ.get("MOBILE_SAFE", "1").lower() not in ("0", "false", "no", "off")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -126,12 +128,12 @@ YTDLP = find_yt_dlp()
 
 QUALITY_FMT = {
     # label -> yt-dlp -f selector
-    # 优先 avc1(H.264)+m4a 的 mp4 组合，iPhone/微信/相册能直接播放和保存；
-    # 拿不到再用通用组合兜底。最终统一 --merge-output-format mp4 转封装。
-    "best": "bv*[vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*+ba/b",
-    "1080": "bv*[height<=1080][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
-    "720": "bv*[height<=720][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]/b",
-    "480": "bv*[height<=480][vcodec^=avc1][ext=mp4]+ba[acodec^=mp4a]/bv*[height<=480]+ba/b[height<=480]/b",
+    # 优先 avc1(H.264)+m4a 的 mp4 组合，这是 iPhone/Safari/相册原生支持的编码；
+    # 拿不到再用通用组合兜底，最后统一转成 H.264+AAC 的 mp4（见 run_job）。
+    "best": "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*[vcodec^=avc1]+ba/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+    "1080": "bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][vcodec^=avc1]+ba/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
+    "720": "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=720][vcodec^=avc1]+ba/bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/b",
+    "480": "bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=480][vcodec^=avc1]+ba/bv*[height<=480][ext=mp4]+ba[ext=m4a]/bv*[height<=480]+ba/b[height<=480]/b",
     "audio": "bestaudio/best",
 }
 
@@ -139,6 +141,74 @@ QUALITY_FMT = {
 def safe_name(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", s)
     return s[:120].strip("_") or "file"
+
+
+def _ffprobe_codecs(path):
+    """Return (vcodec, acodec) of the first video/audio stream, or (None, None)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name", "-of", "json", path],
+            capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout or "{}")
+        v = a = None
+        for st in data.get("streams", []):
+            if st.get("codec_type") == "video" and v is None:
+                v = st.get("codec_name")
+            elif st.get("codec_type") == "audio" and a is None:
+                a = st.get("codec_name")
+        return v, a
+    except Exception:
+        return None, None
+
+
+def ensure_apple_playable(video_path):
+    """If the video isn't H.264/AAC, transcode it to a phone-friendly mp4.
+
+    This is the reliable fix: yt-dlp's --recode-video only re-encodes
+    'if necessary' and can leave VP9/AV1 inside an mp4 container, which
+    iPhone/Safari cannot play (black screen). We probe and force H.264/AAC.
+    Returns the (possibly new) path to use.
+    """
+    vcodec, acodec = _ffprobe_codecs(video_path)
+    if vcodec is None:
+        return video_path  # not a video / probe failed; leave as-is
+    v_ok = vcodec in ("h264", "avc1")
+    a_ok = acodec in (None, "aac", "mp3")  # no audio stream is fine
+    if v_ok and a_ok:
+        return video_path
+    base, _ext = os.path.splitext(video_path)
+    tmp = base + ".__iosfix.mp4"
+    cmd = ["ffmpeg", "-y", "-i", video_path,
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+           "-pix_fmt", "yuv420p"]
+    if acodec:
+        cmd += ["-c:a", "aac", "-b:a", "160k"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-movflags", "+faststart", tmp]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            out_path = base + ".mp4"
+            os.replace(tmp, out_path)
+            if os.path.abspath(out_path) != os.path.abspath(video_path):
+                try:
+                    os.remove(video_path)
+                except Exception:
+                    pass
+            return out_path
+        else:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return video_path
 
 
 def run_job(job_id):
@@ -162,13 +232,11 @@ def run_job(job_id):
         "--no-color",
         "-o", outtmpl,
     ]
-    # 视频统一转封装成 mp4(iOS/微信/相册可直接播放和保存)；仅音频则转 mp3。
+    # 视频统一成 mp4；H.264 兼容性由下载后的 ensure_apple_playable() 兜底转码保证。
     if job.get("quality") == "audio":
         cmd += ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
     else:
         cmd += ["--merge-output-format", "mp4"]
-        # 若源是 webm/mkv 等，尽量无损重封装成苹果兼容的 mp4(H.264)。
-        cmd += ["--remux-video", "mp4"]
     if os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
         cmd += ["--cookies", COOKIES_FILE]
     cmd += [job["url"]]
@@ -220,6 +288,15 @@ def run_job(job_id):
             continue
         full = os.path.join(job_dir, name)
         if os.path.isfile(full) and os.path.getsize(full) > 0:
+            # 保证视频是 H.264/AAC 的 mp4（iPhone/Safari 能播放和保存）
+            if MOBILE_SAFE and job.get("quality") != "audio" and \
+                    name.lower().endswith((".mp4", ".m4v", ".mkv", ".webm", ".mov")):
+                with JOBS_LOCK:
+                    job["phase"] = "converting"
+                full = ensure_apple_playable(full)
+                name = os.path.basename(full)
+            if not os.path.isfile(full) or os.path.getsize(full) == 0:
+                continue
             files.append({"name": name, "size": os.path.getsize(full),
                           "rel": job_id + "/" + name})
 
