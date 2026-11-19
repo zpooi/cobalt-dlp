@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SaveBox · 服务器下载站</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141824; --panel-2:#1b2030; --line:#242b3d;
+    --txt:#e8ecf6; --muted:#8f9bb6; --accent:#5b8cff; --accent-2:#8a5bff;
+    --ok:#35d39a; --err:#ff5c7a; --warn:#ffb545; --radius:16px;
+    --shadow:0 12px 40px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    font-family:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(138,91,255,.16), transparent 60%),
+      radial-gradient(900px 500px at 0% 10%, rgba(91,140,255,.16), transparent 55%),
+      var(--bg);
+    color:var(--txt);
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:960px;margin:0 auto;padding:48px 20px 80px}
+  header{display:flex;align-items:center;gap:14px;margin-bottom:8px}
+  .logo{
+    width:46px;height:46px;border-radius:13px;flex:none;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    display:grid;place-items:center;box-shadow:0 8px 24px rgba(91,140,255,.35);
+  }
+  .logo svg{width:24px;height:24px}
+  h1{font-size:24px;margin:0;letter-spacing:.3px}
+  .sub{color:var(--muted);font-size:13.5px;margin:2px 0 0}
+  .engine{margin-left:auto;font-size:12px;color:var(--muted);
+    background:var(--panel);border:1px solid var(--line);padding:7px 12px;border-radius:999px;
+    display:flex;align-items:center;gap:7px;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
+
+  .card{
+    background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);
+  }
+  .input-card{padding:22px;margin-top:26px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .field{flex:1 1 340px;position:relative}
+  input[type=text]{
+    width:100%;height:54px;padding:0 16px;font-size:15px;color:var(--txt);
+    background:#0d111a;border:1px solid var(--line);border-radius:13px;outline:none;
+    transition:.18s border,.18s box-shadow;
+  }
+  input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(91,140,255,.15)}
+  select{
+    height:54px;padding:0 38px 0 14px;font-size:14.5px;color:var(--txt);
+    background:#0d111a;border:1px solid var(--line);border-radius:13px;outline:none;
+    appearance:none;cursor:pointer;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%238f9bb6'><path d='M4 6l4 4 4-4z'/></svg>");
+    background-repeat:no-repeat;background-position:right 12px center;
+  }
+  .btn{
+    height:54px;padding:0 26px;font-size:15px;font-weight:600;color:#fff;border:none;
+    border-radius:13px;cursor:pointer;white-space:nowrap;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    box-shadow:0 10px 26px rgba(91,140,255,.35);transition:.16s transform,.16s filter;
+  }
+  .btn:hover{filter:brightness(1.07)}
+  .btn:active{transform:translateY(1px)}
+  .btn[disabled]{opacity:.55;cursor:not-allowed;box-shadow:none}
+  .hint{color:var(--muted);font-size:12.5px;margin-top:12px;line-height:1.6}
+  .hint b{color:var(--txt)}
+
+  .jobs-head{display:flex;align-items:center;margin:34px 4px 14px}
+  .jobs-head h2{font-size:15px;margin:0;color:var(--muted);font-weight:600;letter-spacing:.4px}
+  .clear{margin-left:auto;font-size:12.5px;color:var(--muted);cursor:pointer;background:none;border:none}
+  .clear:hover{color:var(--err)}
+
+  .job{padding:16px 18px;margin-bottom:12px;display:flex;gap:16px;align-items:center}
+  .thumb{
+    width:74px;height:74px;border-radius:12px;flex:none;background:#0d111a;
+    border:1px solid var(--line);display:grid;place-items:center;overflow:hidden;position:relative;
+  }
+  .thumb video,.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .thumb .ph{width:26px;height:26px;color:var(--muted)}
+  .meta{flex:1;min-width:0}
+  .meta .name{font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .meta .url{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+  .bar{height:7px;border-radius:999px;background:#0d111a;margin-top:11px;overflow:hidden;border:1px solid var(--line)}
+  .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .35s ease}
+  .status-line{display:flex;gap:10px;align-items:center;margin-top:8px;font-size:12.5px;color:var(--muted);flex-wrap:wrap}
+  .remain{color:var(--muted)}
+  .remain.soon{color:var(--warn)}
+  .badge{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600;letter-spacing:.3px}
+  .badge.queued{background:rgba(143,155,182,.15);color:var(--muted)}
+  .badge.running{background:rgba(91,140,255,.16);color:#8fb0ff}
+  .badge.done{background:rgba(53,211,154,.15);color:var(--ok)}
+  .badge.error{background:rgba(255,92,122,.15);color:var(--err)}
+  .actions{display:flex;gap:8px;flex:none}
+  .ico-btn{
+    width:42px;height:42px;border-radius:11px;border:1px solid var(--line);background:#0d111a;
+    color:var(--muted);cursor:pointer;display:grid;place-items:center;transition:.15s;text-decoration:none;
+  }
+  .ico-btn:hover{color:#fff;border-color:var(--accent);background:#131a2b}
+  .ico-btn svg{width:19px;height:19px}
+  .ico-btn.play:hover{color:var(--ok);border-color:var(--ok)}
+  .ico-btn.del:hover{color:var(--err);border-color:var(--err)}
+  .err-msg{color:var(--err);font-size:12.5px;margin-top:8px;word-break:break-word}
+  .empty{color:var(--muted);text-align:center;padding:38px 0;font-size:14px}
+
+  /* player modal */
+  .modal{
+    position:fixed;inset:0;background:rgba(5,7,12,.82);backdrop-filter:blur(6px);
+    display:none;place-items:center;padding:24px;z-index:50;
+  }
+  .modal.open{display:grid}
+  .modal .inner{max-width:900px;width:100%;}
+  .modal video{width:100%;border-radius:16px;background:#000;box-shadow:var(--shadow);max-height:80vh}
+  .modal .mhead{display:flex;align-items:center;margin-bottom:12px;gap:12px}
+  .modal .mhead .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .modal .close{margin-left:auto;background:none;border:none;color:var(--muted);font-size:26px;cursor:pointer;line-height:1}
+  .modal .close:hover{color:#fff}
+  .toast{
+    position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(20px);
+    background:#1b2030;border:1px solid var(--line);color:var(--txt);padding:12px 20px;border-radius:12px;
+    font-size:14px;opacity:0;pointer-events:none;transition:.25s;box-shadow:var(--shadow);z-index:80;
+  }
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  @media (max-width:640px){
+    .engine{display:none}
+    .wrap{padding:28px 14px 60px}
+    .thumb{width:56px;height:56px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>
+      </svg>
+    </div>
+    <div>
+      <h1>SaveBox</h1>
+      <p class="sub">粘贴链接 · 服务器下载 · 页面直接播放与保存</p>
+    </div>
+    <div class="engine" id="engine"><span class="dot" id="engineDot"></span><span id="engineTxt">检测中…</span></div>
+  </header>
+
+  <div class="card input-card">
+    <div class="row">
+      <div class="field">
+        <input id="url" type="text" placeholder="粘贴 Instagram / YouTube / TikTok / X / Bilibili 链接…" autocomplete="off" spellcheck="false"/>
+      </div>
+      <select id="quality" title="清晰度">
+        <option value="best">最佳画质</option>
+        <option value="1080">1080p</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+        <option value="audio">仅音频</option>
+      </select>
+      <button class="btn" id="go">下载</button>
+    </div>
+    <p class="hint" id="retHint">由服务器上的 <b>yt-dlp</b> 实际下载到服务器，<b>不经过你本机网络</b>。支持需要登录的内容（已配置 cookies）。文件在服务器只保留 <b>1 天</b>，到期自动删除，请及时下载到本地。</p>
+  </div>
+
+  <div class="jobs-head">
+    <h2>任务列表</h2>
+    <button class="clear" id="clearDone">清除已完成</button>
+  </div>
+  <div id="jobs"><div class="empty">还没有任务，粘贴一条链接开始吧</div></div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="inner">
+    <div class="mhead"><div class="t" id="mTitle"></div><button class="close" id="mClose">×</button></div>
+    <video id="mVideo" controls playsinline></video>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s)=>document.querySelector(s);
+const el = (t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
+let POLL = null;
+
+function toast(msg, ms=2200){
+  const t=$("#toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms);
+}
+function humanSize(b){
+  if(!b) return "";
+  const u=["B","KB","MB","GB"]; let i=0; let n=b;
+  while(n>=1024&&i<u.length-1){n/=1024;i++;}
+  return n.toFixed(n<10&&i>0?1:0)+" "+u[i];
+}
+function remainText(ms){
+  if(ms==null) return "";
+  if(ms<=0) return "即将清理";
+  const s=Math.floor(ms/1000);
+  const d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
+  if(d>0) return `${d}天${h}小时后清理`;
+  if(h>0) return `${h}小时${m}分后清理`;
+  if(m>0) return `${m}分钟后清理`;
+  return `${s}秒后清理`;
+}
+function isVideo(name){return /\.(mp4|m4v|webm|mkv)$/i.test(name);}
+function isAudio(name){return /\.(mp3|m4a|opus|ogg)$/i.test(name);}
+
+async function health(){
+  try{
+    const r = await fetch("/api/health"); const j = await r.json();
+    $("#engineDot").className="dot"+(j.ok?"":" bad");
+    $("#engineTxt").textContent = "yt-dlp "+(j.yt_dlp||"?");
+    if(j.retention_hours>0){
+      const h = j.retention_hours;
+      const label = h%24===0 ? (h/24)+" 天" : h+" 小时";
+      $("#retHint").innerHTML = '由服务器上的 <b>yt-dlp</b> 实际下载到服务器，<b>不经过你本机网络</b>。支持需要登录的内容（已配置 cookies）。文件在服务器只保留 <b>'+label+'</b>，到期自动删除，请及时下载到本地。';
+    }
+  }catch(e){
+    $("#engineDot").className="dot bad"; $("#engineTxt").textContent="离线";
+  }
+}
+
+async function submit(){
+  const url = $("#url").value.trim();
+  if(!url){ toast("请先粘贴链接"); $("#url").focus(); return; }
+  if(!/^https?:\/\//i.test(url)){ toast("链接需以 http(s):// 开头"); return; }
+  const q = $("#quality").value;
+  $("#go").disabled=true;
+  try{
+    const r = await fetch("/api/fetch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url,quality:q})});
+    const j = await r.json();
+    if(!r.ok){ toast(j.error||"提交失败"); }
+    else{
+      $("#url").value="";
+      toast("已加入下载队列");
+      refresh();
+      startPoll();
+    }
+  }catch(e){ toast("网络错误: "+e.message); }
+  finally{ $("#go").disabled=false; }
+}
+
+function jobCard(job){
+  const card = el("div","card job");
+  card.dataset.id = job.id;
+
+  const thumb = el("div","thumb");
+  const file = (job.files&&job.files[0]) || null;
+  if(job.status==="done" && file && isVideo(file.name)){
+    const fname = encodeURI(file.rel);
+    thumb.innerHTML = `<video src="/files/${fname}#t=0.1" muted preload="metadata"></video>`;
+  }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
+    thumb.innerHTML = `<img src="/files/${encodeURI(file.rel)}" alt="">`;
+  }else if(job.status==="done" && file && isAudio(file.name)){
+    thumb.innerHTML = `<svg class="ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
+  }else{
+    thumb.innerHTML = `<svg class="ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>`;
+  }
+  card.appendChild(thumb);
+
+  const meta = el("div","meta");
+  const name = el("div","name");
+  name.textContent = (job.filename) || (job.status==="done"?"完成":("解析中… " + job.url));
+  meta.appendChild(name);
+
+  const urlEl = el("div","url"); urlEl.textContent = job.url; meta.appendChild(urlEl);
+
+  const bar = el("div","bar"); const fill = el("i"); bar.appendChild(fill); meta.appendChild(bar);
+
+  const sl = el("div","status-line");
+  const badge = el("span","badge "+job.status);
+  const label = {queued:"排队中",running:"下载中",done:"已完成",error:"失败"}[job.status]||job.status;
+  badge.textContent = label; sl.appendChild(badge);
+
+  if(job.status==="running"){
+    const p = el("span"); p.textContent = (job.phase==="merging"?"合并中…":`${Math.round(job.progress||0)}%`);
+    sl.appendChild(p);
+  }
+  if(job.status==="done" && file){
+    const p = el("span"); p.textContent = humanSize(file.size); sl.appendChild(p);
+  }
+  if((job.status==="done"||job.status==="error") && job.expires){
+    const rem = el("span","remain");
+    const update = ()=>{
+      const left = job.expires - Date.now();
+      rem.textContent = "· ⏳ " + remainText(left);
+      rem.classList.toggle("soon", left < 3600*1000);
+    };
+    update();
+    sl.appendChild(rem);
+  }
+  meta.appendChild(sl);
+
+  if(job.status==="error" && job.error){
+    const e = el("div","err-msg"); e.textContent = job.error; meta.appendChild(e);
+  }
+  card.appendChild(meta);
+
+  // progress width
+  const pct = job.status==="done"?100:(job.progress||0);
+  fill.style.width = pct+"%";
+
+  // actions
+  const actions = el("div","actions");
+  if(job.status==="done" && file){
+    const play = el("button","ico-btn play"); play.title="播放";
+    play.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+    play.onclick = ()=>openPlayer(file.name, "/files/"+encodeURI(file.rel));
+    const dl = el("a","ico-btn"); dl.title="下载"; dl.href="/files/"+encodeURI(file.rel)+"?dl=1"; dl.download=file.name;
+    dl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`;
+    if(isAudio(file.name)){ actions.appendChild(dl); }
+    else { actions.appendChild(play); actions.appendChild(dl); }
+  }
+  const del = el("button","ico-btn del"); del.title="删除";
+  del.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>`;
+  del.onclick = ()=>deleteJob(job.id);
+  actions.appendChild(del);
+  card.appendChild(actions);
+
+  return card;
+}
+
+function renderJobs(jobs){
+  const box = $("#jobs");
+  if(!jobs.length){ box.innerHTML = '<div class="empty">还没有任务，粘贴一条链接开始吧</div>'; return; }
+  box.innerHTML="";
+  jobs.forEach(j=> box.appendChild(jobCard(j)));
+}
+
+async function refresh(){
+  try{
+    const r = await fetch("/api/jobs"); const j = await r.json();
+    renderJobs(j.jobs||[]);
+    const active = (j.jobs||[]).some(x=>x.status==="queued"||x.status==="running");
+    if(active) startPoll(); else stopPoll();
+  }catch(e){}
+}
+
+function startPoll(){
+  if(POLL) return;
+  POLL = setInterval(refresh, 1200);
+}
+function stopPoll(){ if(POLL){clearInterval(POLL);POLL=null;} }
+
+async function deleteJob(id){
+  await fetch("/api/job/"+id, {method:"DELETE"});
+  refresh();
+}
+
+function openPlayer(title, src){
+  $("#mTitle").textContent = title;
+  const v = $("#mVideo"); v.src = src; 
+  $("#modal").classList.add("open");
+  v.play().catch(()=>{});
+}
+$("#mClose").onclick = ()=>{ $("#modal").classList.remove("open"); $("#mVideo").pause(); $("#mVideo").src=""; };
+$("#modal").onclick = (e)=>{ if(e.target.id==="modal"){ $("#mClose").click(); } };
+
+$("#go").onclick = submit;
+$("#url").addEventListener("keydown", e=>{ if(e.key==="Enter") submit(); });
+$("#clearDone").onclick = async ()=>{
+  const r = await fetch("/api/jobs"); const j = await r.json();
+  for(const job of (j.jobs||[])){
+    if(job.status==="done"||job.status==="error"){ await fetch("/api/job/"+job.id,{method:"DELETE"}); }
+  }
+  refresh();
+};
+
+health(); refresh(); startPoll();
+</script>
+</body>
+</html>
