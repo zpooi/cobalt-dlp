@@ -632,6 +632,39 @@ def ensure_apple_playable(video_path, job=None):
     return video_path
 
 
+THUMB_FILE = ".thumb.jpg"
+
+
+def make_thumb(video_path, job_dir, job_id):
+    """Grab one frame with ffmpeg and store it as a small jpg.
+
+    The list uses <video preload="metadata"> as a thumbnail, but iOS/Safari
+    (and some Chrome builds) won't decode any frame until the user presses
+    play, so the tile shows up as a black square. A real image fixes that
+    everywhere. Returns "<jobid>/.thumb.jpg" or None if ffmpeg can't.
+    """
+    out = os.path.join(job_dir, THUMB_FILE)
+    # 先抽 1 秒处，避开很多视频开头的黑场/淡入；短视频不够 1 秒就退回第 0 帧
+    for seek in ("1", "0"):
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+               "-ss", seek, "-i", video_path,
+               "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4",
+               "-f", "image2", out]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=60)
+        except FileNotFoundError:
+            return None
+        except Exception:  # noqa
+            continue
+        if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            return job_id + "/" + THUMB_FILE
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    return None
+
+
 def _job_failed(job, message, log_lines=None):
     with JOBS_LOCK:
         job["status"] = "error"
@@ -1243,9 +1276,11 @@ def run_job(job_id):
             _job_failed(job, explain_failure(tail, rc), tail)
             return
 
-    # collect produced files (skip .part / .ytdl)
+    # collect produced files (skip .part / .ytdl / our own dotfile thumbnails)
     files = []
     for name in sorted(os.listdir(job_dir)):
+        if name.startswith("."):
+            continue
         if name.endswith(".part") or name.endswith(".ytdl") or name.endswith(".temp"):
             continue
         full = os.path.join(job_dir, name)
@@ -1272,10 +1307,19 @@ def run_job(job_id):
             job["updated"] = now_ms()
         return
 
+    # 生成缩略图：<video> 当缩略图在 iOS/Safari 上不会解码，只会显示黑块；
+    # 让服务器抽一帧存成 jpg，任何浏览器都能正常显示。
+    thumb = None
+    for f in files:
+        if f["name"].lower().endswith((".mp4", ".m4v", ".webm", ".mkv", ".mov")):
+            thumb = make_thumb(os.path.join(job_dir, f["name"]), job_dir, job_id)
+            break
+
     with JOBS_LOCK:
         job["status"] = "done"
         job["progress"] = 100.0
         job["files"] = files
+        job["thumb"] = thumb
         job["filename"] = files[0]["name"]
         job["finished"] = now_ms()
         job["updated"] = now_ms()
@@ -1412,6 +1456,7 @@ class Handler(BaseHTTPRequestHandler):
                 "created": now_ms(),
                 "updated": now_ms(),
                 "files": [],
+                "thumb": None,
                 "notes": [],
                 "error": None,
             }

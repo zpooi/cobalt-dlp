@@ -555,11 +555,14 @@ function updateCard(card, job){
   const file = (job.files && job.files[0]) || null;
 
   // 缩略图只在文件真正变化时重建：轮询不会让 <video> 反复加载
-  const thumbSig = job.status + "|" + (file ? file.rel : "");
+  const thumbSig = job.status + "|" + (file ? file.rel : "") + "|" + (job.thumb||"");
   if(r.thumbSig !== thumbSig){
     r.thumbSig = thumbSig;
     if(job.status==="done" && file && isVideo(file.name)){
-      r.thumb.innerHTML = `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline"></video>`;
+      // 服务器用 ffmpeg 抽好的一帧；<video> 当缩略图在 iOS 上只会是黑块
+      r.thumb.innerHTML = job.thumb
+        ? `<img src="${fileUrl(job.thumb)}" alt="">`
+        : `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline"></video>`;
     }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
       r.thumb.innerHTML = `<img src="${fileUrl(file.rel)}" alt="">`;
     }else if(job.status==="done" && file && isAudio(file.name)){
