@@ -25,6 +25,7 @@ by a background janitor thread, so they never pile up on the server.
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -39,7 +40,8 @@ import zipfile
 from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
-from urllib.parse import urlparse, parse_qs, unquote, quote, unquote_plus
+from urllib.parse import (urlparse, parse_qs, unquote, quote, unquote_plus,
+                          urlencode)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.join(HERE, "downloads"))
@@ -1071,6 +1073,11 @@ DOUYIN_ID_RE = re.compile(r"/(?:video|note|share/video|share/note|share/slides)/
 DOUYIN_SECSALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
 UA_DESKTOP = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+# 手机分享页（www.iesdouyin.com）用的 UA；图文接口的 slidesinfo/iteminfo 是
+# 分享页自己调的，带上手机 UA 更接近真实请求。
+UA_MOBILE = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+             "Mobile/15E148 Safari/604.1")
 
 
 class DouyinError(Exception):
@@ -1219,6 +1226,119 @@ def douyin_sign(url, uifid, ts=None):
     return f"{base}?{signed}&x-secsdk-web-signature={sig}"
 
 
+def douyin_abogus_params(params, user_agent=UA_MOBILE):
+    """在请求参数里补上 a_bogus（抖音 web 接口的加密校验参数）。
+
+    模块缺失或算法异常时返回 None，调用方跳过这个兜底而不是让整个任务失败。
+    """
+    try:
+        from douyin_abogus import ABogus
+    except Exception:  # noqa
+        return None
+    signed = dict(params)
+    try:
+        signed["a_bogus"] = ABogus(user_agent).generate_a_bogus(signed)
+    except Exception:  # noqa
+        return None
+    return signed
+
+
+def _douyin_get_json(url, headers, timeout=25):
+    """GET 一个 JSON 接口，返回 (data, 错误说明)。"""
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            text = e.read(300).decode("utf-8", "replace").strip()
+        except Exception:  # noqa
+            text = ""
+        return None, f"HTTP {e.code}" + (f" {text[:80]}" if text else "")
+    except Exception as e:  # noqa
+        return None, str(e)[:100]
+    try:
+        return json.loads(body or b"{}"), ""
+    except ValueError:
+        return None, "返回的不是 JSON"
+
+
+def _douyin_pick_detail(data, video_id):
+    """从 detail / iteminfo / slidesinfo 的响应里取出这个作品本身。"""
+    if not isinstance(data, dict):
+        return None
+    detail = data.get("aweme_detail")
+    if isinstance(detail, dict) and detail:
+        return detail
+    for key in ("aweme_details", "aweme_list"):
+        items = data.get(key)
+        if not isinstance(items, list):
+            continue
+        items = [item for item in items if isinstance(item, dict) and item]
+        for item in items:
+            if str(item.get("aweme_id") or "") == str(video_id):
+                return item
+        # 有些接口会省略 aweme_id；只有确实没写 ID 时才接受列表里的第一条
+        for item in items:
+            if not item.get("aweme_id"):
+                return item
+    return None
+
+
+def douyin_fetch_note_detail(video_id, uifid, cookie_header):
+    """图文作品（/note/）最后兜底：按手机分享页的请求试 iteminfo / slidesinfo。
+
+    主接口（aweme/detail?aid=6383）正常情况下已经能拿到图文作品；这里只在
+    它仍然为空时再试。分享页拉图文用的就是这两个接口，query 里要带 a_bogus。
+    返回 (detail, 诊断信息列表)。
+    """
+    web_id = "77" + "".join(random.choice("0123456789") for _ in range(17))
+    common = {"reflow_source": "reflow_page", "web_id": web_id,
+              "device_id": web_id}
+    headers = {
+        "User-Agent": UA_MOBILE,
+        "Referer": f"https://www.iesdouyin.com/share/note/{video_id}/",
+        "uifid": uifid,
+        "Accept": "application/json",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Cookie": cookie_header,
+    }
+    attempts = [
+        ("iteminfo", "https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/", [
+            dict(common, item_ids=f'["{video_id}"]', aweme_type="68",
+                 aid="6383"),
+            dict(common, item_ids=f'["{video_id}"]'),
+        ]),
+        ("slidesinfo", "https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/", [
+            dict(common, aweme_ids=f"[{video_id}]", aweme_type="68",
+                 aid="6383", request_source="200"),
+            dict(common, aweme_ids=f"[{video_id}]"),
+        ]),
+    ]
+    reasons = []
+    for name, base_url, variants in attempts:
+        for params in variants:
+            signed = douyin_abogus_params(params)
+            if signed is None:
+                reasons.append(f"{name}: a_bogus 不可用")
+                break
+            data, err = _douyin_get_json(base_url + "?" + urlencode(signed),
+                                         headers, timeout=12)
+            detail = _douyin_pick_detail(data, video_id)
+            if detail:
+                return detail, reasons
+            if data:
+                msg = f"status_code={data.get('status_code')}"
+                if data.get("status_msg"):
+                    msg += f" {data.get('status_msg')}"
+                if data.get("filter_list"):
+                    msg += f" filter={data.get('filter_list')}"
+                reasons.append(f"{name}: {msg}")
+            else:
+                reasons.append(f"{name}: {err}")
+    return None, reasons
+
+
 def douyin_fetch_detail(video_id, cookies_path):
     cookie_header, uifid, count, _ = _parse_douyin_cookies(cookies_path)
     if not uifid:
@@ -1227,8 +1347,11 @@ def douyin_fetch_detail(video_id, cookies_path):
             f"抖音 cookies 里没有 UIFID（合并后的文件里有 {count} 个抖音 cookie，"
             f"共 {files} 个 cookies 文件）。请在浏览器登录 douyin.com 后重新导出 cookies，"
             f"确认文件里有一行以 UIFID 开头的记录，放进 cookies/ 目录再试。")
+    # aid=6383 是网页端 app id：不带它时抖音会把图文作品判成 images_base
+    # 并返回 aweme_detail=null（视频不受影响，所以原来只在图文上暴露出来）。
     url = douyin_sign(
-        f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={video_id}", uifid)
+        f"https://www.douyin.com/aweme/v1/web/aweme/detail/"
+        f"?aweme_id={video_id}&aid=6383", uifid)
     headers = {
         "User-Agent": UA_DESKTOP,
         "Referer": "https://www.douyin.com/",
@@ -1262,7 +1385,17 @@ def douyin_fetch_detail(video_id, cookies_path):
         raise DouyinError("抖音接口返回的不是 JSON，可能被风控了，稍后重试。")
     detail = data.get("aweme_detail")
     if not detail:
-        raise DouyinError("抖音没有返回这个视频：可能已删除 / 私密，或 cookies 过期。")
+        # 图文作品走 detail 有时只回 aweme_detail=null，改用分享页的
+        # iteminfo / slidesinfo 兜底（这两条接口的返回字段仍是 images/video）。
+        fallback, reasons = douyin_fetch_note_detail(
+            video_id, uifid, cookie_header)
+        if fallback:
+            return fallback
+        why = (data.get("filter_detail") or {}).get("filter_reason") or ""
+        extra = "；".join(([why] if why else []) + reasons[:3])
+        raise DouyinError(
+            "抖音没有返回这个作品：可能已删除 / 私密，或 cookies 过期。"
+            + (f"（{extra}）" if extra else ""))
     return detail
 
 

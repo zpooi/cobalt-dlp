@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 装不上也不影响构建，程序会自动跳过这个重试策略。
 RUN pip install --no-cache-dir curl_cffi || true
 
-COPY app.py index.html selftest.py ./
+COPY app.py douyin_abogus.py index.html selftest.py ./
 
 ENV PORT=13000 \
     HOST=0.0.0.0 \

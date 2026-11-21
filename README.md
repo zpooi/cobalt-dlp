@@ -66,6 +66,7 @@ cookies 是 Netscape 格式的文本文件（浏览器扩展导出的就是）�
 ```
 cobalt-dlp/
 ├── app.py                # 后端（HTTP 服务 + 任务队列 + yt-dlp 调用）
+├── douyin_abogus.py      # 抖音 a_bogus 签名（纯 Python，图文兜底用）
 ├── index.html            # 前端页面
 ├── selftest.py           # 逐平台自检脚本
 ├── requirements.txt      # yt-dlp
@@ -131,7 +132,7 @@ cobalt-dlp/
 
 **关于 cookies**：按站分开存成多个文件最省事（`www.douyin_com_cookies.txt`、`bilibili.txt`…），替换或新增后直接重新下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
 
-**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。视频作品选"仅音频"时下载视频后用 ffmpeg 转 mp3；图文作品（`/note/<id>`）则保存 `images` 里的全部图片。
+**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。视频作品选"仅音频"时下载视频后用 ffmpeg 转 mp3；图文作品（`/note/<id>`）则保存 `images` 里的全部图片。请求 `aweme/detail` 时固定带网页端 app id（`aid=6383`）——不带它时，抖音会把图文作品判成 `images_base` 并只返回 `aweme_detail=null`（视频不受影响，所以这个坑之前只在图文链接上暴露）。如果仍然为空，再按手机分享页的请求补一个 `a_bogus` 签名，试 `iteminfo` / `slidesinfo`（纯 Python 生成，`douyin_abogus.py`）。
 
 **机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战）。处理顺序：
 
