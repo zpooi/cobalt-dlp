@@ -281,6 +281,24 @@
     width:auto;height:auto;max-width:100%;max-height:min(78vh, 78dvh);
     object-fit:contain;
   }
+  .modal img{
+    display:block;margin:0 auto;background:#0d1119;border-radius:14px;
+    width:auto;height:auto;max-width:100%;max-height:min(78vh, 78dvh);
+    object-fit:contain;
+  }
+  .modal .mhead .mdownload{display:inline-flex;flex:none}
+  .mnav{
+    display:none;align-items:center;justify-content:center;gap:16px;
+    padding-top:12px;color:var(--muted);font-size:13px;font-weight:600;
+  }
+  .mnav button{
+    width:40px;height:40px;border-radius:50%;border:1px solid var(--line);
+    background:#f6f8ff;color:var(--text-2);font-size:22px;line-height:1;
+    cursor:pointer;display:grid;place-items:center;transition:.15s;
+  }
+  .mnav button:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+  .mnav button[disabled]{opacity:.35;cursor:not-allowed;background:#f2f4fa;color:var(--muted-2)}
+  .mnav .mcount{min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
 
   /* ---------- toast ---------- */
   .toast{
@@ -406,8 +424,18 @@
 
 <div class="modal" id="modal">
   <div class="inner">
-    <div class="mhead"><div class="t" id="mTitle"></div><button class="close" id="mClose" aria-label="关闭">×</button></div>
+    <div class="mhead">
+      <div class="t" id="mTitle"></div>
+      <a class="ico-btn mdownload" id="mDownload" title="保存这张" aria-label="保存这张" style="display:none"></a>
+      <button class="close" id="mClose" aria-label="关闭">×</button>
+    </div>
     <video id="mVideo" controls playsinline webkit-playsinline x5-playsinline preload="metadata"></video>
+    <img id="mImg" alt="" style="display:none"/>
+    <div class="mnav" id="mNav">
+      <button id="mPrev" aria-label="上一张">‹</button>
+      <span class="mcount" id="mCount"></span>
+      <button id="mNext" aria-label="下一张">›</button>
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -424,7 +452,8 @@ const ICON = {
   dl:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`,
   del:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>`,
   retry:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>`,
-  info: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>`
+  info: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>`,
+  gallery:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.4"/><path d="m20.5 15.5-4.5-4.5L5.5 21.5"/></svg>`
 };
 
 function toast(msg, ms=2200){
@@ -449,6 +478,7 @@ function remainText(ms){
 }
 function isVideo(name){return /\.(mp4|m4v|webm|mkv|mov)$/i.test(name);}
 function isAudio(name){return /\.(mp3|m4a|opus|ogg)$/i.test(name);}
+function isImage(name){return /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(name);}
 function hostOf(u){
   try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return ""; }
 }
@@ -552,18 +582,28 @@ function jobCard(job){
 
 function updateCard(card, job){
   const r = card._refs;
-  const file = (job.files && job.files[0]) || null;
+  const files = job.files || [];
+  const file = files[0] || null;
+  const imgs = files.filter(f=>isImage(f.name));
+  const archive = job.archive || null;
 
   // 缩略图只在文件真正变化时重建：轮询不会让 <video> 反复加载
-  const thumbSig = job.status + "|" + (file ? file.rel : "") + "|" + (job.thumb||"");
+  const thumbSig = job.status + "|" + (file ? file.rel : "") + "|" + (job.thumb||"") + "|" + imgs.length;
   if(r.thumbSig !== thumbSig){
     r.thumbSig = thumbSig;
-    if(job.status==="done" && file && isVideo(file.name)){
+    r.thumb.onclick = null;
+    r.thumb.style.cursor = "";
+    if(job.status==="done" && imgs.length){
+      // 图文任务：第一张图就是缩略图，点开看大图/逐张保存
+      r.thumb.innerHTML = `<img src="${fileUrl(job.thumb || imgs[0].rel)}" alt="">`;
+      r.thumb.style.cursor = "pointer";
+      r.thumb.onclick = ()=>openGallery(job.filename || imgs[0].name, imgs, 0);
+    }else if(job.status==="done" && file && isVideo(file.name)){
       // 服务器用 ffmpeg 抽好的一帧；<video> 当缩略图在 iOS 上只会是黑块
       r.thumb.innerHTML = job.thumb
         ? `<img src="${fileUrl(job.thumb)}" alt="">`
         : `<video src="${fileUrl(file.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline"></video>`;
-    }else if(job.status==="done" && file && /\.(jpg|jpeg|png|webp)$/i.test(file.name)){
+    }else if(job.status==="done" && file && isImage(file.name)){
       r.thumb.innerHTML = `<img src="${fileUrl(file.rel)}" alt="">`;
     }else if(job.status==="done" && file && isAudio(file.name)){
       r.thumb.innerHTML = ICON.music;
@@ -591,6 +631,9 @@ function updateCard(card, job){
     info = job.phase==="converting" ? "转码中…" : (job.phase==="merging" ? "合并中…" : `${Math.round(job.progress||0)}%`);
   }else if(job.status==="queued"){
     info = "等待开始";
+  }else if(job.status==="done" && imgs.length){
+    const total = imgs.reduce((n,f)=>n+(f.size||0), 0);
+    info = (imgs.length > 1 ? imgs.length + " 张 · " : "") + humanSize(total);
   }else if(job.status==="done" && file){
     info = humanSize(file.size);
   }
@@ -628,19 +671,33 @@ function updateCard(card, job){
   }
 
   // 操作按钮只在状态/文件变化时重建，避免每次轮询重绑事件
-  const actionsSig = job.status + "|" + (file ? file.rel : "");
+  const actionsSig = job.status + "|" + (file ? file.rel : "") + "|" + imgs.length + "|" + (archive||"");
   if(r.actionsSig !== actionsSig){
     r.actionsSig = actionsSig;
     r.actions.innerHTML = "";
     if(job.status==="done" && file){
-      if(!isAudio(file.name)){
+      const videoFile = files.find(f=>isVideo(f.name)) || null;
+      if(videoFile){
         const play = el("button","ico-btn play"); play.title="播放"; play.setAttribute("aria-label","播放");
         play.innerHTML = ICON.play;
-        play.onclick = ()=>openPlayer(file.name, fileUrl(file.rel));
+        play.onclick = ()=>openPlayer(videoFile.name, fileUrl(videoFile.rel));
         r.actions.appendChild(play);
       }
-      const dl = el("a","ico-btn"); dl.title="下载"; dl.setAttribute("aria-label","下载");
-      dl.href=fileUrl(file.rel)+"?dl=1"; dl.download=file.name;
+      if(imgs.length){
+        const gal = el("button","ico-btn play");
+        gal.title = imgs.length > 1 ? `查看全部 ${imgs.length} 张图片` : "查看图片";
+        gal.setAttribute("aria-label", gal.title);
+        gal.innerHTML = ICON.gallery;
+        gal.onclick = ()=>openGallery(job.filename || imgs[0].name, imgs, 0);
+        r.actions.appendChild(gal);
+      }
+      // 多图任务下载 zip（一次保存全部），单图/视频直接保存对应文件
+      const target = archive ? fileUrl(archive)+"?dl=1"
+        : fileUrl(videoFile ? videoFile.rel : (imgs.length ? imgs[0].rel : file.rel))+"?dl=1";
+      const dl = el("a","ico-btn"); dl.title = archive ? "下载全部（zip）" : "下载";
+      dl.setAttribute("aria-label", dl.title);
+      dl.href = target;
+      if(!archive) dl.download = videoFile ? videoFile.name : (imgs.length ? imgs[0].name : file.name);
       dl.innerHTML = ICON.dl;
       r.actions.appendChild(dl);
     }
@@ -733,15 +790,62 @@ async function deleteJob(id){
   refresh();
 }
 
+// 看图弹层：图文任务可以左右翻页、逐张保存
+let GAL = {files:[], i:0, name:""};
+
+function galMove(delta){
+  if(GAL.files.length < 2) return;
+  GAL.i = (GAL.i + delta + GAL.files.length) % GAL.files.length;
+  showGallery();
+}
+function showGallery(){
+  const n = GAL.files.length, f = GAL.files[GAL.i];
+  if(!f) return;
+  $("#mTitle").textContent = GAL.name;
+  $("#mImg").src = fileUrl(f.rel);
+  $("#mCount").textContent = n > 1 ? `${GAL.i+1} / ${n}` : "";
+  $("#mPrev").disabled = n < 2;
+  $("#mNext").disabled = n < 2;
+  const dl = $("#mDownload");
+  dl.style.display = "";
+  dl.href = fileUrl(f.rel) + "?dl=1";
+  dl.download = f.name;
+  dl.innerHTML = ICON.dl;
+}
+function openGallery(name, files, start=0){
+  GAL = {files, i: Math.max(0, Math.min(start, files.length-1)), name: name || "图片"};
+  const v = $("#mVideo"); v.pause(); v.src = ""; v.style.display = "none";
+  $("#mImg").style.display = "";
+  $("#mNav").style.display = files.length > 1 ? "flex" : "none";
+  showGallery();
+  $("#modal").classList.add("open");
+}
 function openPlayer(title, src){
+  GAL = {files:[], i:0, name:""};
   $("#mTitle").textContent = title;
-  const v = $("#mVideo"); v.src = src;
+  $("#mImg").style.display = "none"; $("#mImg").src = "";
+  $("#mNav").style.display = "none";
+  $("#mDownload").style.display = "none"; $("#mDownload").removeAttribute("href");
+  const v = $("#mVideo"); v.style.display = ""; v.src = src;
   $("#modal").classList.add("open");
   v.play().catch(()=>{});
 }
-$("#mClose").onclick = ()=>{ $("#modal").classList.remove("open"); $("#mVideo").pause(); $("#mVideo").src=""; };
-$("#modal").onclick = (e)=>{ if(e.target.id==="modal"){ $("#mClose").click(); } };
-document.addEventListener("keydown", e=>{ if(e.key==="Escape" && $("#modal").classList.contains("open")) $("#mClose").click(); });
+function closeModal(){
+  $("#modal").classList.remove("open");
+  const v = $("#mVideo"); v.pause(); v.src = "";
+  $("#mImg").src = "";
+  GAL = {files:[], i:0, name:""};
+}
+$("#mPrev").onclick = ()=>galMove(-1);
+$("#mNext").onclick = ()=>galMove(1);
+$("#mClose").onclick = closeModal;
+$("#modal").onclick = (e)=>{ if(e.target.id==="modal") closeModal(); };
+document.addEventListener("keydown", e=>{
+  if(!$("#modal").classList.contains("open")) return;
+  if(e.key==="Escape") closeModal();
+  else if(GAL.files.length > 1 && e.key==="ArrowLeft") galMove(-1);
+  else if(GAL.files.length > 1 && e.key === "ArrowRight") galMove(1);
+});
 
 $("#go").onclick = submit;
 $("#url").addEventListener("keydown", e=>{ if(e.key==="Enter") submit(); });

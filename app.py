@@ -4,6 +4,9 @@ cobalt-dlp — a small web downloader powered by yt-dlp.
 
 Paste a link -> server downloads it with yt-dlp -> play / download from the page.
 
+Videos, audio, image posts (抖音/小红书/Instagram 图文) and direct image links
+are all supported; multi-image jobs also get a zip bundle.
+
 Supports optional cookies (cookies.txt) for Instagram / YouTube / etc.
 
 Endpoints:
@@ -32,6 +35,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
@@ -391,7 +395,8 @@ def explain_failure(lines, returncode):
     if "404" in low:
         return "链接失效（HTTP 404）。"
     if "no video formats found" in low:
-        return "没有找到可下载的视频流：可能是图文/纯图片内容，或该站提取器暂时失效（可更新 yt-dlp）。"
+        return ("没有找到可下载的视频流，也没能提取到页面里的图片："
+                "可能是图文/纯图片内容，或该站提取器暂时失效（可更新 yt-dlp）。")
     if "requested format is not available" in low or "format is not available" in low:
         return ("没有可用的下载格式：YouTube 在机房 IP 上常只返回受限流（SABR）。"
                 "程序已自动强制 IPv4 并轮换客户端；仍失败请确认 cookies/ 里的 YouTube cookies "
@@ -665,6 +670,387 @@ def make_thumb(video_path, job_dir, job_id):
     return None
 
 
+# ---------------------------------------------------------------- 图片 / 图文
+# yt-dlp 只为"视频流"设计：图文帖子（抖音/小红书/Instagram 图片帖）没有
+# formats，会直接报 "No video formats found"。这里补一层图片通道：
+#   1) 链接本身就是图片 → 直接下载（不走 yt-dlp）
+#   2) 抖音图文 → 内置下载器从 aweme_detail.images 取原图
+#   3) 其他平台 → 让 yt-dlp 用 --ignore-no-formats-error 输出 JSON，
+#      从 thumbnails 里取出页面上的图片并逐张下载
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif")
+IMAGE_URL_RE = re.compile(r"\.(?:jpe?g|png|webp|gif|bmp|avif)$", re.I)
+# 出现这些错误说明"页面里根本没有视频"，才值得再试图片；
+# YouTube 机器人校验之类的视频失败绝不能拿封面图冒充下载结果。
+IMAGE_FALLBACK_ERRORS = (
+    "no video formats found", "there is no video in this post",
+    "no video could be found in this tweet", "no video in this post",
+    "unsupported url", "no formats found",
+)
+IMAGE_REFERERS = (
+    ("douyin.com", "https://www.douyin.com/"),
+    ("douyinpic.com", "https://www.douyin.com/"),
+    ("xiaohongshu.com", "https://www.xiaohongshu.com/"),
+    ("xhscdn.com", "https://www.xiaohongshu.com/"),
+    ("instagram.com", "https://www.instagram.com/"),
+    ("cdninstagram.com", "https://www.instagram.com/"),
+    ("fbcdn.net", "https://www.instagram.com/"),
+    ("twimg.com", "https://x.com/"),
+    ("pinterest.com", "https://www.pinterest.com/"),
+    ("pinimg.com", "https://www.pinterest.com/"),
+    ("weibo.com", "https://weibo.com/"),
+    ("sinaimg.cn", "https://weibo.com/"),
+    ("bilibili.com", "https://www.bilibili.com/"),
+    ("hdslb.com", "https://www.bilibili.com/"),
+)
+
+
+class ImageError(Exception):
+    """图片下载失败（已经是给用户看的中文）。"""
+
+
+def is_image_name(name):
+    return (name or "").lower().endswith(IMAGE_EXTS)
+
+
+def make_image_thumb(image_path, job_dir, job_id):
+    """Small jpg for the task list; using the full photo as an icon is too heavy."""
+    if not FFMPEG:
+        return None
+    out = os.path.join(job_dir, THUMB_FILE)
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+           "-i", image_path, "-frames:v", "1",
+           "-vf", "scale='min(320,iw)':-2", "-q:v", "4", "-f", "image2", out]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=60)
+    except Exception:  # noqa
+        return None
+    if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+        return job_id + "/" + THUMB_FILE
+    try:
+        os.remove(out)
+    except OSError:
+        pass
+    return None
+
+
+def looks_like_image_url(url):
+    p = urlparse(url or "")
+    if IMAGE_URL_RE.search(p.path or ""):
+        return True
+    q = parse_qs(p.query or "")
+    for key in ("format", "fm"):
+        ext = (q.get(key) or [""])[0].lower()
+        if ext in ("jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"):
+            return True
+    return False
+
+
+def image_referer(url):
+    """图片 CDN 常检查 Referer：按图片域名给对应站点的首页，避免 403。"""
+    host = (urlparse(url or "").hostname or "").lower()
+    for suffix, referer in IMAGE_REFERERS:
+        if host == suffix or host.endswith("." + suffix):
+            return referer
+    p = urlparse(url or "")
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}/"
+    return ""
+
+
+def image_title(url):
+    """从图片直链里取一个适合做文件名的标题。"""
+    stem = os.path.splitext(os.path.basename(unquote(urlparse(url or "").path)))[0]
+    return image_stem(stem or "image")
+
+
+def image_stem(title):
+    """文件名前缀：保留中文，去掉路径/非法字符，且不能以点开头（否则会被隐藏）。"""
+    stem = safe_name(re.sub(r"[\r\n\t]+", " ", title or ""))
+    return stem.lstrip("._") or "image"
+
+
+def cookie_header_for(url, cookies_path):
+    """按 URL 的主机从合并后的 Netscape cookies 里拼出 Cookie 头。"""
+    host = (urlparse(url or "").hostname or "").lower()
+    if not host or not cookies_path or not os.path.isfile(cookies_path):
+        return ""
+    pairs = []
+    try:
+        with open(cookies_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return ""
+    req_path = urlparse(url or "").path or "/"
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#HttpOnly_"):
+            s = s[len("#HttpOnly_"):]
+        elif s.startswith("#"):
+            continue
+        parts = s.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, cpath, name, value = parts[0].lstrip(".").lower(), parts[2] or "/", parts[5], parts[6]
+        if not (host == domain or host.endswith("." + domain)):
+            continue
+        if not req_path.startswith(cpath):
+            continue
+        try:
+            expires = int(parts[4] or 0)
+        except ValueError:
+            expires = 0
+        if expires and expires < time.time():
+            continue
+        pairs.append(f"{name}={value}")
+    return "; ".join(dict.fromkeys(pairs))
+
+
+def _sniff_image_ext(head):
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if head[:2] == b"BM":
+        return ".bmp"
+    if head[4:8] == b"ftyp" and head[8:12] in (b"avif", b"avis"):
+        return ".avif"
+    return None
+
+
+def _mime_image_ext(ctype):
+    return {
+        "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+        "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp",
+        "image/avif": ".avif",
+    }.get((ctype or "").lower().split(";")[0].strip())
+
+
+def _unique_path(path):
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 2
+    while True:
+        candidate = f"{base}_{i}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def download_image(url, dest_stem, job=None, referer=None, cookies_path=None):
+    """Download one image. Returns the saved path, or None if the URL isn't an image.
+
+    返回 None 表示"内容不是图片"（比如热链拦截返回了 HTML），调用方可以改走
+    其它策略；网络/HTTP 错误则抛 ImageError，避免把真实失败悄悄吞掉。
+    """
+    headers = {
+        "User-Agent": UA_DESKTOP,
+        # 不主动要 AVIF：老版本 iOS 相册存不了，宁可让服务器给 JPEG/WebP
+        "Accept": "image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5",
+    }
+    ref = referer or image_referer(url)
+    if ref:
+        headers["Referer"] = ref
+    ck = cookie_header_for(url, cookies_path)
+    if ck:
+        headers["Cookie"] = ck
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            head = r.read(65536)
+            if not head:
+                raise ImageError("图片地址返回了空内容")
+            ext = _sniff_image_ext(head) or _mime_image_ext(r.headers.get("Content-Type"))
+            if not ext:
+                return None
+            dest = _unique_path(dest_stem + ext)
+            tmp = dest + ".part"
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(head)
+                    while True:
+                        chunk = r.read(256 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
+                    raise ImageError("图片内容为空")
+                os.replace(tmp, dest)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+            return dest
+    except urllib.error.HTTPError as e:
+        raise ImageError(f"图片服务器返回 HTTP {e.code}（可能需要 cookies 或更换出口网络）")
+    except ImageError:
+        raise
+    except Exception as e:  # noqa
+        raise ImageError(f"图片下载失败：{e}")
+
+
+def direct_image_download(job, job_dir, url, cookies_path):
+    """Download a direct image link. Returns a path, or None if it's not an image."""
+    with JOBS_LOCK:
+        job["phase"] = "downloading"
+        job["progress"] = 0.0
+    dest = download_image(url, os.path.join(job_dir, image_title(url)), job,
+                          referer=image_referer(url), cookies_path=cookies_path)
+    if dest:
+        with JOBS_LOCK:
+            job["title"] = os.path.splitext(os.path.basename(dest))[0]
+            job["progress"] = 100.0
+    return dest
+
+
+def yt_dlp_dump_json(job, cookies_path):
+    """Ask yt-dlp for the info dict without downloading anything."""
+    cmd = YTDLP + [
+        "--dump-single-json", "--skip-download", "--ignore-no-formats-error",
+        "--no-warnings", "--no-color", "--socket-timeout", "20",
+        "--retries", "3", "--extractor-retries", "2",
+    ]
+    if cookies_path:
+        cmd += ["--cookies", cookies_path]
+    cmd += _proxy_args(_host_of(job["url"])) + [job["url"]]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=180)
+    except Exception:  # noqa
+        return None
+    out = (r.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        m = re.search(r"(\{.*\})\s*$", out, re.S)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(1))
+        except ValueError:
+            return None
+
+
+def collect_image_candidates(info):
+    """Pick one best image URL per picture out of a yt-dlp info dict.
+
+    Extractor 的 thumbnails 里同一张图常有多档尺寸：去掉 query / `!` 处理参数后
+    地址相同的归为一组，取像素面积最大的一张。纯视频条目跳过（它们的封面不是
+    用户要的图片）。
+    """
+    found = []  # (url, width, height, title)
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        entries = node.get("entries")
+        if entries:
+            for entry in entries:
+                walk(entry)
+            return
+        if node.get("formats"):
+            return
+        title = node.get("title") or node.get("description") or ""
+        for thumb in node.get("thumbnails") or []:
+            if not isinstance(thumb, dict):
+                continue
+            u = thumb.get("url")
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                found.append((u, int(thumb.get("width") or 0),
+                              int(thumb.get("height") or 0), title))
+        u = node.get("url")
+        if isinstance(u, str) and u.startswith(("http://", "https://")) and looks_like_image_url(u):
+            found.append((u, 0, 0, title))
+
+    walk(info)
+
+    groups, order = {}, []
+    for u, w, h, title in found:
+        key = re.split(r"[!?#]", u, 1)[0]   # 去掉缩放参数，得到图片本体地址
+        # Pinterest 把尺寸写在路径里（/736x/、/originals/），归一到同一个地址
+        key = re.sub(r"/(?:\d+x\d*|originals)/", "/", key)
+        idx = groups.get(key)
+        if idx is None:
+            groups[key] = len(order)
+            order.append((u, w, h, title))
+        else:
+            cur = order[idx]
+            if w * h > cur[1] * cur[2]:
+                order[idx] = (u, w, h, title)
+
+    out = []
+    for u, w, h, title in order:
+        if w and h and w < 300 and h < 300:   # 头像/图标之类的小图
+            continue
+        out.append((u, w, h, title))
+    return out
+
+
+def save_images(job, job_dir, candidates, page_url, cookies_path):
+    """Download all candidate images into the job directory."""
+    n = len(candidates)
+    title = next((t for _, _, _, t in candidates if t), "") or image_title(page_url)
+    title = image_stem(title)
+    saved = []
+    with JOBS_LOCK:
+        job["phase"] = "downloading"
+        job["progress"] = 0.0
+    for i, (url, _w, _h, _t) in enumerate(candidates, 1):
+        stem = title + (f"_{i:02d}" if n > 1 else "")
+        try:
+            dest = download_image(url, os.path.join(job_dir, stem), job,
+                                  referer=image_referer(url), cookies_path=cookies_path)
+        except ImageError as e:
+            _job_note(job, f"第 {i} 张图片下载失败：{e}")
+            dest = None
+        if dest:
+            saved.append(dest)
+        else:
+            _job_note(job, f"第 {i} 张不是图片，已跳过")
+        with JOBS_LOCK:
+            job["progress"] = round(i * 100.0 / n, 1)
+    if not saved:
+        raise ImageError("没有下载到任何图片（链接可能已失效，或该内容需要 cookies 登录）")
+    with JOBS_LOCK:
+        job["title"] = title
+    return saved
+
+
+def download_images_fallback(job, job_dir, cookies_path):
+    """No video was found: try to save the images on the page instead."""
+    info = yt_dlp_dump_json(job, cookies_path)
+    candidates = collect_image_candidates(info) if info else []
+    if candidates:
+        return save_images(job, job_dir, candidates, job["url"], cookies_path)
+    # 有些图片直链没有扩展名，yt-dlp 会报 Unsupported URL；直接按图片再试一次
+    try:
+        dest = direct_image_download(job, job_dir, job["url"], cookies_path)
+    except ImageError:
+        dest = None
+    return [dest] if dest else []
+
+
+def make_image_archive(job_dir, job_id, files, title):
+    """Bundle multiple images into one zip so phone users can save them at once."""
+    stem = image_stem(title or "images")
+    path = _unique_path(os.path.join(job_dir, stem + ".zip"))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for f in files:
+            zf.write(os.path.join(job_dir, f["name"]), arcname=f["name"])
+    return job_id + "/" + os.path.basename(path)
+
+
 def _job_failed(job, message, log_lines=None):
     with JOBS_LOCK:
         job["status"] = "error"
@@ -679,8 +1065,9 @@ def _job_failed(job, message, log_lines=None):
 # 一律 403（"Uifid Not Found" / "Signature Not Found"），换任何 cookies 都不行。
 # 这里自己按 x-secsdk-web-signature 的算法签名（uifid + timestamp + 固定盐值），
 # 请求头再带上 uifid，才能拿到 aweme_detail；cookies 里必须有 UIFID。
-DOUYIN_HOST_RE = re.compile(r"https?://(?:[a-z0-9-]+\.)*douyin\.com/", re.I)
-DOUYIN_ID_RE = re.compile(r"/(?:video|share/video)/(\d{10,25})")
+DOUYIN_HOST_RE = re.compile(r"https?://(?:[a-z0-9-]+\.)*(?:douyin|iesdouyin)\.com/", re.I)
+# 视频是 /video/<id>，图文作品是 /note/<id>；短链 v.douyin.com 会重定向到其中之一
+DOUYIN_ID_RE = re.compile(r"/(?:video|note|share/video|share/note|share/slides)/(\d{10,25})")
 DOUYIN_SECSALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
 UA_DESKTOP = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -691,10 +1078,15 @@ class DouyinError(Exception):
 
 
 def douyin_video_id(url):
-    """从视频页或 v.douyin.com 短链里取出 aweme_id（取不到返回 ""）。"""
+    """从视频/图文页或 v.douyin.com 短链里取出 aweme_id（取不到返回 ""）。"""
     m = DOUYIN_ID_RE.search(url or "")
     if m:
         return m.group(1)
+    q = parse_qs(urlparse(url or "").query)
+    for key in ("modal_id", "aweme_id", "item_ids"):
+        value = (q.get(key) or [""])[0]
+        if re.fullmatch(r"\d{10,25}", value or ""):
+            return value
     m = re.match(r"https?://v\.douyin\.com/[A-Za-z0-9_-]+", url or "", re.I)
     if not m:
         return ""
@@ -890,12 +1282,44 @@ def douyin_pick_url(detail):
     return best
 
 
-def douyin_filename(detail):
+def douyin_title(detail):
     desc = (detail.get("desc") or "").strip() or str(detail.get("aweme_id") or "douyin")
     desc = re.sub(r"[\r\n\t]+", " ", desc)
     desc = re.sub(r'[\\/:*?"<>|]+', " ", desc)
     desc = re.sub(r"\s{2,}", " ", desc).strip(" .")[:80].strip(" .")
-    return (desc or "douyin") + ".mp4"
+    return desc or "douyin"
+
+
+def douyin_filename(detail):
+    return douyin_title(detail) + ".mp4"
+
+
+def douyin_image_urls(detail):
+    """图文作品的原图地址（每组取一张，优先 download_url_list 的高清版）。"""
+    items = detail.get("images")
+    if not isinstance(items, list) or not items:
+        items = (detail.get("image_post_info") or {}).get("images") or []
+    flat = []
+    for item in items:
+        if isinstance(item, list):      # 个别版本会多包一层数组
+            flat.extend(item)
+        else:
+            flat.append(item)
+    urls = []
+    for item in flat:
+        if isinstance(item, str):
+            urls.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        for key in ("download_url_list", "url_list"):
+            candidates = item.get(key) or []
+            url = next((u for u in candidates
+                        if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
+            if url:
+                urls.append(url)
+                break
+    return [u for u in urls if isinstance(u, str) and u.startswith(("http://", "https://"))]
 
 
 def _http_to_file(url, dest, job, headers):
@@ -1207,17 +1631,51 @@ def run_ytdlp(job, job_dir):
     return rc, tail
 
 
+def douyin_download_images(job, job_dir, detail, urls, cookies):
+    """下载抖音图文作品的每一张原图。"""
+    title = douyin_title(detail)
+    n = len(urls)
+    saved = []
+    with JOBS_LOCK:
+        job["phase"] = "downloading"
+        job["progress"] = 0.0
+    for i, url in enumerate(urls, 1):
+        stem = image_stem(title) + (f"_{i:02d}" if n > 1 else "")
+        try:
+            dest = download_image(url, os.path.join(job_dir, stem), job,
+                                  referer="https://www.douyin.com/", cookies_path=cookies)
+        except ImageError as e:
+            _job_note(job, f"第 {i} 张图片下载失败：{e}")
+            dest = None
+        if dest:
+            saved.append(dest)
+        else:
+            _job_note(job, f"第 {i} 张不是图片，已跳过")
+        with JOBS_LOCK:
+            job["progress"] = round(i * 100.0 / n, 1)
+    if not saved:
+        raise DouyinError("这是抖音图文作品，但一张图片也没下载到（CDN 链接可能已过期），重试一次。")
+    with JOBS_LOCK:
+        job["title"] = title
+    return saved
+
+
 def douyin_download(job, job_dir, video_id):
-    """下载抖音视频/音频，返回产出的文件路径。"""
+    """下载抖音视频/音频/图文，返回产出的文件路径（列表）。"""
     try:
         cookies = merged_cookies_path()
     except Exception as e:  # noqa
         raise DouyinError(f"cookies 合并失败：{e}")
     detail = douyin_fetch_detail(video_id, cookies)
+    images = douyin_image_urls(detail)
+    if images:
+        # 图文作品：把轮播里的图片全部保存下来
+        saved = douyin_download_images(job, job_dir, detail, images, cookies)
+        if job.get("quality") == "audio":
+            _job_note(job, f"这是图文作品（{len(images)} 张图片），没有可提取的音频，已保存全部图片")
+        return saved
     url = douyin_pick_url(detail)
     if not url:
-        if detail.get("images"):
-            raise DouyinError("这是图文作品，暂不支持下载。")
         raise DouyinError("没解析到视频地址，可能视频已删除或受限。")
     dest = os.path.join(job_dir, douyin_filename(detail))
     with JOBS_LOCK:
@@ -1234,7 +1692,32 @@ def douyin_download(job, job_dir, video_id):
         with JOBS_LOCK:
             job["phase"] = "merging"
         dest = douyin_to_mp3(dest, job)
-    return dest
+    return [dest]
+
+
+def collect_job_files(job, job_dir, job_id):
+    """List the files a job produced (skip .part / .ytdl / our dotfile thumbs)."""
+    files = []
+    for name in sorted(os.listdir(job_dir)):
+        if name.startswith("."):
+            continue
+        if name.endswith((".part", ".ytdl", ".temp", ".unknown_video", ".unknown_audio")):
+            continue
+        full = os.path.join(job_dir, name)
+        if not (os.path.isfile(full) and os.path.getsize(full) > 0):
+            continue
+        # 保证视频是 H.264/AAC 的 mp4（iPhone/Safari 能播放和保存）；图片不转码
+        if (MOBILE_SAFE and job.get("quality") != "audio" and not is_image_name(name)
+                and name.lower().endswith((".mp4", ".m4v", ".mkv", ".webm", ".mov"))):
+            with JOBS_LOCK:
+                job["phase"] = "converting"
+            full = ensure_apple_playable(full, job)
+            name = os.path.basename(full)
+        if not os.path.isfile(full) or os.path.getsize(full) == 0:
+            continue
+        files.append({"name": name, "size": os.path.getsize(full),
+                      "rel": job_id + "/" + name})
+    return files
 
 
 def run_job(job_id):
@@ -1249,6 +1732,12 @@ def run_job(job_id):
     with JOBS_LOCK:
         job["status"] = "running"
         job["updated"] = now_ms()
+
+    try:
+        cookies = merged_cookies_path()
+    except Exception as e:  # noqa
+        cookies = None
+        _job_note(job, f"cookies 合并失败，按无 cookies 处理：{e}")
 
     tail = []
     removed = removed_platform_message(job["url"])
@@ -1267,38 +1756,60 @@ def run_job(job_id):
             _job_failed(job, f"抖音下载出错：{e}", tail)
             return
     else:
-        try:
-            rc, tail = run_ytdlp(job, job_dir)
-        except Exception as e:  # noqa
-            _job_failed(job, str(e), tail)
-            return
-        if rc != 0:
-            _job_failed(job, explain_failure(tail, rc), tail)
-            return
+        direct_done = False
+        # 直链图片：不走 yt-dlp，省一次解析，也避免 "Unsupported URL"
+        if looks_like_image_url(job["url"]):
+            try:
+                dest = direct_image_download(job, job_dir, job["url"], cookies)
+            except ImageError as e:
+                _job_failed(job, str(e), tail)
+                return
+            if not dest:
+                _job_failed(job, "链接看起来是图片，但服务器返回的不是图片内容："
+                                 "可能被防盗链拦截，或该链接需要 cookies 登录。", tail)
+                return
+            direct_done = True
+            tail = [f"直接下载图片：{os.path.basename(dest)}"]
+        if not direct_done:
+            try:
+                rc, tail = run_ytdlp(job, job_dir)
+            except Exception as e:  # noqa
+                _job_failed(job, str(e), tail)
+                return
+            if rc != 0:
+                low = "\n".join(tail).lower()
+                saved = []
+                if any(k in low for k in IMAGE_FALLBACK_ERRORS):
+                    _job_note(job, "没有视频流，改按图文/图片下载…")
+                    try:
+                        # 小红书/微博的图文同样需要访客 cookies，补一次再解析
+                        fb_cookies = cookies_with_visitor(
+                            _host_of(job["url"]), cookies, job_dir, job)
+                    except Exception:  # noqa
+                        fb_cookies = cookies
+                    try:
+                        saved = download_images_fallback(job, job_dir, fb_cookies)
+                    except ImageError as e:
+                        _job_note(job, f"图片兜底失败：{e}")
+                if not saved:
+                    _job_failed(job, explain_failure(tail, rc), tail)
+                    return
 
-    # collect produced files (skip .part / .ytdl / our own dotfile thumbnails)
-    files = []
-    for name in sorted(os.listdir(job_dir)):
-        if name.startswith("."):
-            continue
-        if name.endswith(".part") or name.endswith(".ytdl") or name.endswith(".temp"):
-            continue
-        full = os.path.join(job_dir, name)
-        if os.path.isfile(full) and os.path.getsize(full) > 0:
-            # 保证视频是 H.264/AAC 的 mp4（iPhone/Safari 能播放和保存）
-            if MOBILE_SAFE and job.get("quality") != "audio" and \
-                    name.lower().endswith((".mp4", ".m4v", ".mkv", ".webm", ".mov")):
-                with JOBS_LOCK:
-                    job["phase"] = "converting"
-                full = ensure_apple_playable(full, job)
-                name = os.path.basename(full)
-            if not os.path.isfile(full) or os.path.getsize(full) == 0:
-                continue
-            files.append({"name": name, "size": os.path.getsize(full),
-                          "rel": job_id + "/" + name})
+    files = collect_job_files(job, job_dir, job_id)
+    if not files and not douyin_id:
+        # yt-dlp 退出码为 0 却什么都没产出：最后再试一次图文提取
+        try:
+            fb_cookies = cookies_with_visitor(_host_of(job["url"]), cookies, job_dir, job)
+        except Exception:  # noqa
+            fb_cookies = cookies
+        try:
+            download_images_fallback(job, job_dir, fb_cookies)
+        except ImageError:
+            pass
+        files = collect_job_files(job, job_dir, job_id)
 
     if not files:
-        msg = "没有产出文件：下载过程没报错但没有拿到内容，链接可能不是视频页面。"
+        msg = "没有产出文件：下载过程没报错但没有拿到内容，链接可能不是视频/图文页面。"
         with JOBS_LOCK:
             job["status"] = "error"
             job["error"] = msg
@@ -1307,20 +1818,38 @@ def run_job(job_id):
             job["updated"] = now_ms()
         return
 
-    # 生成缩略图：<video> 当缩略图在 iOS/Safari 上不会解码，只会显示黑块；
+    images = [f for f in files if is_image_name(f["name"])]
+    videos = [f for f in files if not is_image_name(f["name"])]
+
+    # 图片任务：缩略图直接用第一张图，多图再打一个 zip 方便一次保存
+    thumb, archive, kind = None, None, "video" if videos else "images"
+    filename = files[0]["name"]
+    if images:
+        thumb = make_image_thumb(os.path.join(job_dir, images[0]["name"]),
+                                 job_dir, job_id) or images[0]["rel"]
+        if len(images) > 1:
+            title = (job.get("title") or "").strip()
+            archive = make_image_archive(job_dir, job_id, images, title or "images")
+            filename = f"{title or '图片'}（{len(images)} 张）"
+    if images and videos:
+        kind = "mixed"
+    # 视频缩略图：<video> 当缩略图在 iOS/Safari 上不会解码，只会显示黑块；
     # 让服务器抽一帧存成 jpg，任何浏览器都能正常显示。
-    thumb = None
-    for f in files:
-        if f["name"].lower().endswith((".mp4", ".m4v", ".webm", ".mkv", ".mov")):
-            thumb = make_thumb(os.path.join(job_dir, f["name"]), job_dir, job_id)
-            break
+    if not thumb:
+        for f in videos:
+            if f["name"].lower().endswith((".mp4", ".m4v", ".webm", ".mkv", ".mov")):
+                thumb = make_thumb(os.path.join(job_dir, f["name"]), job_dir, job_id)
+                break
 
     with JOBS_LOCK:
         job["status"] = "done"
         job["progress"] = 100.0
         job["files"] = files
         job["thumb"] = thumb
-        job["filename"] = files[0]["name"]
+        job["archive"] = archive
+        job["kind"] = kind
+        job["image_count"] = len(images)
+        job["filename"] = filename
         job["finished"] = now_ms()
         job["updated"] = now_ms()
 
@@ -1337,7 +1866,15 @@ def download_filename(fname):
     if not re.fullmatch(r"\.[a-z0-9]{1,5}", ext):
         ext = ".mp4"
     ascii_stem = re.sub(r"[^A-Za-z0-9._\-]+", "_", stem).strip("._-")
-    ascii_stem = re.sub(r"_{2,}", "_", ascii_stem)[:150].strip("._-") or "video"
+    if ext in IMAGE_EXTS:
+        fallback = "image"
+    elif ext == ".zip":
+        fallback = "images"
+    elif ext in (".mp3", ".m4a", ".aac", ".opus", ".ogg"):
+        fallback = "audio"
+    else:
+        fallback = "video"
+    ascii_stem = re.sub(r"_{2,}", "_", ascii_stem)[:150].strip("._-") or fallback
     return ascii_stem + ext
 
 
@@ -1457,6 +1994,10 @@ class Handler(BaseHTTPRequestHandler):
                 "updated": now_ms(),
                 "files": [],
                 "thumb": None,
+                "archive": None,
+                "kind": None,
+                "image_count": 0,
+                "title": None,
                 "notes": [],
                 "error": None,
             }
@@ -1555,6 +2096,14 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "image/png"
         elif low.endswith(".webp"):
             ctype = "image/webp"
+        elif low.endswith(".gif"):
+            ctype = "image/gif"
+        elif low.endswith(".bmp"):
+            ctype = "image/bmp"
+        elif low.endswith(".avif"):
+            ctype = "image/avif"
+        elif low.endswith(".zip"):
+            ctype = "application/zip"
 
         # iOS AVPlayer 会先用小 Range 探测，处理不对就整段放弃(黑屏)
         r = self._parse_range(size)

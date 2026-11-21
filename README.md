@@ -8,6 +8,8 @@
 - 支持国内平台：**B站、抖音、小红书、微博、西瓜视频、今日头条、搜狐、AcFun、CCTV、QQ音乐、网易云音乐、喜马拉雅、虎牙**
 - **分享文案直接粘**：抖音/小红书/B站 App 复制出来的整段文字（带表情、带“复制此链接打开…”）会自动抠出链接，不用手动删
 - 页面内 **视频在线播放**（支持拖动进度）+ 一键下载
+- **图片 / 图文也支持**：抖音图文、小红书图文、Instagram 图文等没有视频的内容会自动保存图片；多图打包成 zip 一次下载，也可以点开逐张预览/保存
+- **图片直链直接下**：粘贴 jpg / png / webp / gif / avif 图片地址即可下载，不用经过视频解析
 - 清晰度可选：最佳 / 1080p / 720p / 480p / 仅音频
 - 实时进度条、任务列表、失败原因提示
 - **文件只保留 1 天**：下载完成的文件在服务器保留 24 小时，到期由后台自动删除，不会长期占用服务器磁盘（可配置）
@@ -79,15 +81,15 @@ cobalt-dlp/
 | 平台 | 状态 | 需要 cookies？ |
 |---|---|---|
 | B站（视频/番剧/收藏夹/UP主空间/动态） | ✅ 可用 | 默认自动补 buvid3/buvid4/b_nut；**机房/海外 IP 被 412 时**建议配登录 cookies（含 SESSDATA）或走国内代理；1080P 以上也需要登录 cookies |
-| 抖音（含 `v.douyin.com` 短链） | ✅ 内置下载器 | **必须**：带 `UIFID` 的 douyin cookies；图文作品暂不支持 |
+| 抖音（含 `v.douyin.com` 短链） | ✅ 内置下载器 | **必须**：带 `UIFID` 的 douyin cookies；视频、图文（多图）都支持 |
 | 微博 / 今日头条 / 搜狐 / AcFun / CCTV | ✅ 可用 | 一般不需要 |
 | 网易云音乐 / 喜马拉雅 | ✅ 可用（选"仅音频"） | 不需要 |
 | QQ音乐 | ⚠️ 部分歌曲需要登录 | VIP/付费/部分版权歌曲需要 cookies |
 | 虎牙（直播/回放） | ✅ 可用 | 不需要 |
-| 小红书（含 `xhslink.com` 短链） | ⚠️ 仅视频笔记 | **必须**：不配 cookies 会被登录墙拦下；图文笔记不支持 |
+| 小红书（含 `xhslink.com` 短链） | ⚠️ 视频 / 图文 | **必须**：不配 cookies 会被登录墙拦下；图文笔记会抓取笔记里的多张图片 |
 | 西瓜视频 | ⚠️ 需要 cookies | 未登录时提取器直接要求 cookies |
 | YouTube | ✅ 可用 | 家宽 IP 一般不需要；**机房 IP 基本必须**（自动：强制 IPv4 + 轮换 8 种客户端 + Deno；仍被拦就只能配登录 cookies） |
-| Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies |
+| Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies。Instagram 图片帖会走图片兜底，多图同样打包下载 |
 | SoundCloud / Pinterest | ✅ 可用 | 不需要 |
 | Facebook / Reddit / Vimeo 等 | ✅ yt-dlp 支持的都行 | 视内容 |
 | 快手、腾讯视频(v.qq.com)、芒果TV、咪咕、酷狗 | ❌ 暂不支持 | yt-dlp 没有对应提取器 |
@@ -109,10 +111,27 @@ cobalt-dlp/
 - **画质兜底**：选了 1080p 但源最高只有 720p 时，自动退回"最佳可用画质"，而不是直接失败
 - **网络重试**：`--retries 5 --fragment-retries 10 --extractor-retries 3`，超时/5xx/断流会自动再试
 - **iOS 兼容兜底**：下载后统一用 ffprobe 复检，非 H.264/AAC 自动转码（见下文）
+- **图文自动兜底**：没有视频流的内容会改抓页面里的图片；多图自动打包 zip，单图直接保存
+
+## 图片 / 图文下载
+
+除了视频，项目现在也支持"没有视频的内容"：
+
+| 场景 | 行为 |
+|---|---|
+| 图片直链（`.jpg/.jpeg/.png/.webp/.gif/.bmp/.avif`，含 `?format=jpg` 这类地址） | 直接下载原图，不经过 yt-dlp |
+| 抖音图文作品（`/note/<id>` 或 `v.douyin.com` 短链跳转到 note） | 内置下载器取 `aweme_detail.images`，按顺序保存全部原图 |
+| 小红书图文笔记 | 没有视频时用 yt-dlp 的缩略图列表取出笔记里的每张图并下载 |
+| Instagram / Pinterest 等图片帖 | 提取器报"没有视频"时自动按图片兜底；同一张图的多档尺寸会自动去重取最大 |
+| 多图任务 | 页面内可左右翻页预览、逐张保存；右上角"下载"一次下载 zip |
+
+图片任务同样受保留时间限制（默认 24 小时），到期连图片和 zip 一起删除。图文作品没有音频，选"仅音频"时会保留图片并在卡片上提示。
+
+> 通用兜底取决于 yt-dlp 的提取器有没有把页面上的图片暴露出来（`thumbnails`）。抖音、小红书、Instagram、Pinterest 等已覆盖；微博九宫格、TikTok 图片轮播这类提取器只返回音频/不返回图片的站点暂不支持。
 
 **关于 cookies**：按站分开存成多个文件最省事（`www.douyin_com_cookies.txt`、`bilibili.txt`…），替换或新增后直接重新下载即可，**不用重启容器**。单个文件里放多个站也照样支持。
 
-**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。选"仅音频"时下载视频后用 ffmpeg 转 mp3。
+**抖音为什么不用 yt-dlp**：yt-dlp 官方的 Douyin 提取器会被抖音 Argus 网关直接 403（`Uifid Not Found` / `Signature Not Found`），加什么 cookies 都一样。本项目内置了抖音下载器：先从 `v.douyin.com` 短链拿到视频 ID，按 `x-secsdk-web-signature` 算法给 `aweme/detail` 接口签名（`uifid + timestamp + 固定盐值` 的 MD5），请求头再带上 `uifid`，从而拿到视频地址。所以抖音**必须有 cookies**，且文件里要包含 `UIFID`（或 `UIFID_TEMP`）；缺了会直接提示重新导出。视频作品选"仅音频"时下载视频后用 ffmpeg 转 mp3；图文作品（`/note/<id>`）则保存 `images` 里的全部图片。
 
 **机房 IP 上 YouTube 的"Sign in to confirm you're not a bot"**：这不是配置错了，而是 YouTube 按 IP 信誉拦截。这台机器（GCP）属于典型被标记的机房 IP。程序已经做了能自动做的部分（强制 IPv4、轮换 8 种播放客户端、内置 Deno 解 JS 挑战）。处理顺序：
 
