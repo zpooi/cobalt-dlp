@@ -1428,7 +1428,12 @@ def douyin_filename(detail):
 
 
 def douyin_image_urls(detail):
-    """图文作品的原图地址（每组取一张，优先 download_url_list 的高清版）。"""
+    """图文作品的原图地址（每组取一张，优先无水印的 url_list）。
+
+    download_url_list 走的是 ~tplv-dy-water-* 模板，右下角带「抖音号：xxx」
+    水印；url_list 是网页展示用的 ~tplv-dy-aweme-images-* 模板，不带水印。
+    两者分辨率相同，所以优先 url_list，只有它缺失时才退回 download_url_list。
+    """
     items = detail.get("images")
     if not isinstance(items, list) or not items:
         items = (detail.get("image_post_info") or {}).get("images") or []
@@ -1445,7 +1450,7 @@ def douyin_image_urls(detail):
             continue
         if not isinstance(item, dict):
             continue
-        for key in ("download_url_list", "url_list"):
+        for key in ("url_list", "download_url_list"):
             candidates = item.get(key) or []
             url = next((u for u in candidates
                         if isinstance(u, str) and u.startswith(("http://", "https://"))), "")

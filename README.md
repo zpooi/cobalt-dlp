@@ -121,7 +121,7 @@ cobalt-dlp/
 | 场景 | 行为 |
 |---|---|
 | 图片直链（`.jpg/.jpeg/.png/.webp/.gif/.bmp/.avif`，含 `?format=jpg` 这类地址） | 直接下载原图，不经过 yt-dlp |
-| 抖音图文作品（`/note/<id>` 或 `v.douyin.com` 短链跳转到 note） | 内置下载器取 `aweme_detail.images`，按顺序保存全部原图 |
+| 抖音图文作品（`/note/<id>` 或 `v.douyin.com` 短链跳转到 note） | 内置下载器取 `aweme_detail.images`，按顺序保存全部原图；优先 `url_list`（网页展示版，**不带「抖音号」水印**），没有时才退回水印版 |
 | 小红书图文笔记 | 没有视频时用 yt-dlp 的缩略图列表取出笔记里的每张图并下载 |
 | Instagram / Pinterest 等图片帖 | 提取器报"没有视频"时自动按图片兜底；同一张图的多档尺寸会自动去重取最大 |
 | 多图任务 | 页面内可左右翻页预览、逐张保存；右上角"下载"一次下载 zip |
