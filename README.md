@@ -87,7 +87,7 @@ cobalt-dlp/
 | 网易云音乐 / 喜马拉雅 | ✅ 可用（选"仅音频"） | 不需要 |
 | QQ音乐 | ⚠️ 部分歌曲需要登录 | VIP/付费/部分版权歌曲需要 cookies |
 | 虎牙（直播/回放） | ✅ 可用 | 不需要 |
-| 小红书（含 `xhslink.com` 短链） | ⚠️ 视频 / 图文 / 实况 | **必须**：不配 cookies 会被登录墙拦下；图文笔记会抓取笔记里的多张图片，实况照片保存为 MP4 |
+| 小红书（含 `xhslink.com` 短链） | ⚠️ 视频 / 图文 / 实况 | **必须**：不配 cookies 会被登录墙拦下；图文笔记直接保存原图（每张只存一份），视频笔记和实况照片都保存为 MP4 |
 | 西瓜视频 | ⚠️ 需要 cookies | 未登录时提取器直接要求 cookies |
 | YouTube | ✅ 可用 | 家宽 IP 一般不需要；**机房 IP 基本必须**（自动：强制 IPv4 + 轮换 8 种客户端 + Deno；仍被拦就只能配登录 cookies） |
 | Instagram / TikTok / X（Twitter） | ⚠️ 视内容 | 多数内容需要；X 会自动在 GraphQL 被限流时切到 syndication 接口，仍失败就配 cookies。Instagram 图片帖会走图片兜底，多图同样打包下载 |
@@ -123,13 +123,13 @@ cobalt-dlp/
 | 图片直链（`.jpg/.jpeg/.png/.webp/.gif/.bmp/.avif`，含 `?format=jpg` 这类地址） | 直接下载原图，不经过 yt-dlp |
 | 抖音图文作品（`/note/<id>` 或 `v.douyin.com` 短链跳转到 note） | 内置下载器合并 `aweme_detail.images` 和 `image_post_info.images`（按 `uri` 去重），按顺序保存全部原图；优先 `url_list`（网页展示版，**不带「抖音号」水印**），没有时才退回水印版 |
 | 抖音实况照片（Live Photo / 动图） | 图片对象里带 `video.play_addr` 时保存 **MP4 动图流**（抖音只提供 720p 左右的短视频，不是 GIF）；视频拿不到时自动退回同一张的静态封面，不会整项丢失 |
-| 小红书图文笔记（含实况照片） | 带实况动图的笔记由内置解析器读取 `__INITIAL_STATE__` 里的 `imageList`：静图取 `infoList` 最大尺寸原图，实况存 MP4（优先 h264、无水印流，拿不到视频时退回同一张静图）；普通图文仍走 yt-dlp，避免重复下载 |
+| 小红书图文 / 视频笔记 | 内置解析器读取 `__INITIAL_STATE__`：图文按 `imageList` 顺序保存 `infoList` 最大尺寸版本（每张只存一份，不会把 `urlDefault`/`urlPre` 存成一大一小两张）；视频笔记取 `note.video` 的流，实况照片取 `livePhoto` 的流，都保存为 MP4 |
 | Instagram / Pinterest 等图片帖 | 提取器报"没有视频"时自动按图片兜底；同一张图的多档尺寸会自动去重取最大 |
 | 多图任务 | 预览弹层带缩略图条：点缩略图切换大图，右上角"下载"只保存当前这张，底部「全选下载全部」一次下载 zip（也可以左右翻页 / 键盘方向键切换）；动图缩略图带 ▶ 角标，点开静音循环播放，单独下载得到 MP4 |
 
 图片任务同样受保留时间限制（默认 24 小时），到期连图片和 zip 一起删除。图文作品没有音频，选"仅音频"时会保留图片并在卡片上提示。
 
-> **小红书实况照片**：实况视频流在笔记页面的 `window.__INITIAL_STATE__` 里（`imageList[i].livePhoto.media.stream`，部分版本在 `imageList[i].stream`），不是独立的视频作品。内置解析器会优先选 h264、无水印的流保存成 MP4；解析需要登录 cookies（至少含 `a1`），分享链接里的 `xsec_token` 也要保留，缺了会被跳到登录墙/404。普通图文/视频笔记不受影响，仍然交给 yt-dlp。
+> **小红书图文 / 视频 / 实况**：内容都在笔记页面的 `window.__INITIAL_STATE__` 里。图文按 `imageList` 每项取一张最大尺寸图；实况视频流在 `imageList[i].livePhoto.media.stream`（部分版本在 `imageList[i].stream`），视频笔记在 `note.video.media.stream`，都优先选 h264、无水印的流保存成 MP4。图文和视频都由内置解析器直接处理，避免 yt-dlp 把同一张图的 `urlDefault`/`urlPre` 两档缩略图都当图片、存成一大一小两张。解析需要登录 cookies（至少含 `a1`），分享链接里的 `xsec_token` 也要保留，缺了会被跳到登录墙/404。
 
 > 通用兜底取决于 yt-dlp 的提取器有没有把页面上的图片暴露出来（`thumbnails`）。抖音、小红书、Instagram、Pinterest 等已覆盖；微博九宫格、TikTok 图片轮播这类提取器只返回音频/不返回图片的站点暂不支持。
 

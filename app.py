@@ -944,12 +944,29 @@ def yt_dlp_dump_json(job, cookies_path):
             return None
 
 
+def _image_thumb_key(url):
+    """同一张图的归一化 key：忽略 http/https、query 和 ! 处理参数。"""
+    key = re.split(r"[!?#]", url, 1)[0]
+    parsed = urlparse(key)
+    if parsed.netloc:
+        # 小红书同一个 token 会同时给 http/https，方案不同不应算两张图
+        key = parsed.netloc.lower() + parsed.path
+    # Pinterest 把尺寸写在路径里（/736x/、/originals/），归一到同一个地址
+    return re.sub(r"/(?:\d+x\d*|originals)/", "/", key)
+
+
+def _image_thumb_rank(url, width, height):
+    """同尺寸时优先 urlDefault/nd_dft，别选 urlPre/nd_prv 的模糊预览图。"""
+    preview = 1 if re.search(r"(?:nd_prv|wb_prv|url_pre|preview)", url, re.I) else 0
+    return (width * height, 0 if preview else 1)
+
+
 def collect_image_candidates(info):
     """Pick one best image URL per picture out of a yt-dlp info dict.
 
-    Extractor 的 thumbnails 里同一张图常有多档尺寸：去掉 query / `!` 处理参数后
-    地址相同的归为一组，取像素面积最大的一张。纯视频条目跳过（它们的封面不是
-    用户要的图片）。
+    Extractor 的 thumbnails 里同一张图常有多档尺寸：归一化后地址相同的归为一组，
+    取像素面积最大的那张；面积相同时优先非预览图。纯视频条目跳过（它们的封面
+    不是用户要的图片）。
     """
     found = []  # (url, width, height, title)
 
@@ -979,16 +996,14 @@ def collect_image_candidates(info):
 
     groups, order = {}, []
     for u, w, h, title in found:
-        key = re.split(r"[!?#]", u, 1)[0]   # 去掉缩放参数，得到图片本体地址
-        # Pinterest 把尺寸写在路径里（/736x/、/originals/），归一到同一个地址
-        key = re.sub(r"/(?:\d+x\d*|originals)/", "/", key)
+        key = _image_thumb_key(u)   # 去掉缩放参数，得到图片本体地址
         idx = groups.get(key)
         if idx is None:
             groups[key] = len(order)
             order.append((u, w, h, title))
         else:
             cur = order[idx]
-            if w * h > cur[1] * cur[2]:
+            if _image_thumb_rank(u, w, h) > _image_thumb_rank(cur[0], cur[1], cur[2]):
                 order[idx] = (u, w, h, title)
 
     out = []
@@ -1550,13 +1565,13 @@ def douyin_media_items(detail):
         if existing is not None:
             # 同一项在两处字段里出现：优先动图；补上静图作为兜底
             if kind == "video" and existing["kind"] == "image":
-                existing.update(kind="video", url=url,
+                existing.update(kind="video", url=url, live=True,
                                 image_url=image_url or existing.get("image_url"))
             elif existing["kind"] == "video" and not existing.get("image_url") and image_url:
                 existing["image_url"] = image_url
             by_key.update({k: existing for k in keys})
             continue
-        entry = {"kind": kind, "url": url}
+        entry = {"kind": kind, "url": url, "live": kind == "video"}
         if image_url:
             entry["image_url"] = image_url
         for key in keys:
@@ -1908,6 +1923,8 @@ def save_media_items(job, job_dir, title, items, cookies, referer, error_cls):
         stem = image_stem(title) + (f"_{i:0{width}d}" if n > 1 else "")
         dest = None
         if item["kind"] == "video":
+            is_live = bool(item.get("live", True))
+            label = "动图" if is_live else "视频"
             try:
                 dest = _unique_path(os.path.join(job_dir, stem + ".mp4"))
                 headers = {"User-Agent": UA_DESKTOP, "Referer": referer}
@@ -1917,8 +1934,9 @@ def save_media_items(job, job_dir, title, items, cookies, referer, error_cls):
                 _http_to_file(item["url"], dest, job, headers)
                 if not _looks_like_video_file(dest):
                     raise error_cls("CDN 返回的不是视频（链接可能已过期）")
-                with JOBS_LOCK:
-                    job.setdefault("live_files", []).append(os.path.basename(dest))
+                if is_live:
+                    with JOBS_LOCK:
+                        job.setdefault("live_files", []).append(os.path.basename(dest))
             except Exception as e:  # noqa
                 if dest and os.path.isfile(dest):
                     try:
@@ -1926,9 +1944,9 @@ def save_media_items(job, job_dir, title, items, cookies, referer, error_cls):
                     except OSError:
                         pass
                 dest = None
-                _job_note(job, f"第 {i} 个动图下载失败：{e}")
+                _job_note(job, f"第 {i} 个{label}下载失败：{e}")
                 if item.get("image_url"):
-                    # 动图拿不到时至少把封面静图存下来，别整项丢失
+                    # 视频/动图拿不到时至少把封面静图存下来，别整项丢失
                     try:
                         dest = download_image(
                             item["image_url"], os.path.join(job_dir, stem), job,
@@ -1950,7 +1968,7 @@ def save_media_items(job, job_dir, title, items, cookies, referer, error_cls):
         with JOBS_LOCK:
             job["progress"] = round(i * 100.0 / n, 1)
     if not saved:
-        raise error_cls("这是图文作品，但一项也没下载到（CDN 链接可能已过期），重试一次。")
+        raise error_cls("这是图文/视频作品，但一项也没下载到（CDN 链接可能已过期），重试一次。")
     with JOBS_LOCK:
         job["title"] = title
     return saved
@@ -2005,8 +2023,9 @@ def douyin_download(job, job_dir, video_id):
 #     静图：infoList[{url,width,height}]（取最大尺寸）或 urlDefault/url
 #     实况：livePhoto.media.stream（h264[]/h265[]/av1[]，masterUrl/backupUrls）
 #           或顶层 imageList[i].stream（部分版本 livePhoto 只是布尔标记）
-# 普通图文和视频笔记继续交给 yt-dlp；只有检测到至少一个实况动图才整篇接管，
-# 否则会和 yt-dlp 的图片兜底各存一遍。
+# 图文、视频、实况笔记都直接用这里解析：yt-dlp 的 thumbnails 会把同一张图的
+# urlDefault/urlPre 两档都列出来，容易存成一大一小两张（小图很糊）。解析失败
+# 或视频流拿不到时再回退给 yt-dlp。
 XHS_HOST_RE = re.compile(
     r"https?://(?:[a-z0-9-]+\.)*(?:xiaohongshu\.com|xiaohongshu\.cn|"
     r"xhslink\.com|xhslink\.cn|rednote\.com)/", re.I)
@@ -2068,13 +2087,18 @@ def _xhs_deep_find(obj, key, depth=0):
     return None
 
 
+def _xhs_looks_like_note(value):
+    return isinstance(value, dict) and bool(
+        value.get("imageList") or value.get("image_list") or value.get("video"))
+
+
 def _xhs_find_note_by_id(obj, note_id, depth=0):
     """按 noteId 精确找笔记对象，避免拿到首屏推荐流里的别的笔记。"""
     if depth > 30:
         return None
     if isinstance(obj, dict):
         if str(obj.get("noteId") or obj.get("id") or "") == note_id:
-            if obj.get("imageList") or obj.get("image_list"):
+            if _xhs_looks_like_note(obj):
                 return _xhs_unwrap(obj)
         for value in obj.values():
             found = _xhs_find_note_by_id(value, note_id, depth + 1)
@@ -2183,7 +2207,11 @@ def _xhs_normalize_url(url):
 
 
 def _xhs_image_url(img):
-    """静图取最大尺寸版本；去掉 !nd_dft_... 之类的裁剪后缀，拿原图。"""
+    """静图取最大尺寸版本（infoList 里面积最大的那一档）。
+
+    保留 ``!nd_dft_...`` 后缀：这是 XHS CDN 的正常取图参数，去掉反而可能
+    被防盗链拦下；``WB_PRV / nd_prv`` 那档才是模糊小图，这里按面积排除了。
+    """
     best, best_rank = "", (-1, -1)
     for info in img.get("infoList") or []:
         if not isinstance(info, dict):
@@ -2196,7 +2224,14 @@ def _xhs_image_url(img):
         except (TypeError, ValueError):
             area = 0
         scene = str(info.get("imageScene") or "")
-        rank = (area, 2 if scene == "WB_DFT" else (1 if scene == "WB_PRV" else 0))
+        low = url.lower()
+        if "nd_prv" in low or "wb_prv" in low or scene == "WB_PRV":
+            quality = 0          # 预览小图
+        elif "nd_dft" in low or scene == "WB_DFT":
+            quality = 2          # 默认高清图
+        else:
+            quality = 1
+        rank = (area, quality)
         if rank > best_rank:
             best, best_rank = url, rank
     if not best:
@@ -2204,11 +2239,12 @@ def _xhs_image_url(img):
             best = _xhs_norm_url(img.get(key))
             if best:
                 break
-    return best.split("!")[0] if best else ""
+    return best
 
 
 def _xhs_stream_url(stream):
     """从 stream 对象里选一条可播放的地址：优先 h264，其次无水印、大文件。"""
+    stream = _xhs_unwrap(stream)
     if not isinstance(stream, dict):
         return ""
     codecs = ("h264", "hevc", "h265", "h266", "av1")
@@ -2245,7 +2281,7 @@ def _xhs_is_video_url(url):
 
 def _xhs_live_url(img):
     """找出实况图的视频流；没有实况返回 ""。"""
-    lp = img.get("livePhoto")
+    lp = _xhs_unwrap(img.get("livePhoto"))
     if isinstance(lp, str):
         url = _xhs_norm_url(lp)
         if url and _xhs_is_video_url(url):
@@ -2273,7 +2309,7 @@ def _xhs_live_url(img):
         if url:
             return url
 
-    video = img.get("video")
+    video = _xhs_unwrap(img.get("video"))
     if isinstance(video, dict):
         for stream in ((video.get("media") or {}).get("stream"),
                        video.get("stream"), video):
@@ -2314,7 +2350,7 @@ def _xhs_pick_note(state, note_id):
             value = _xhs_unwrap(value)
             note = _xhs_unwrap(value.get("note")) if (
                 isinstance(value, dict) and isinstance(value.get("note"), dict)) else value
-            if isinstance(note, dict) and (note.get("imageList") or note.get("image_list")):
+            if _xhs_looks_like_note(note):
                 entries.append((str(key), note))
         if note_id:
             for key, note in entries:
@@ -2335,7 +2371,7 @@ def _xhs_pick_note(state, note_id):
     if isinstance(root, dict):
         for key in ("noteData", "noteDetail", "note"):
             value = _xhs_unwrap(root.get(key))
-            if isinstance(value, dict) and (value.get("imageList") or value.get("image_list")):
+            if _xhs_looks_like_note(value):
                 return value
     return None
 
@@ -2366,18 +2402,60 @@ def _xhs_state_note(html, url=""):
     return None
 
 
-def _xhs_note_items(note):
-    """把 note.imageList 转成 [{kind,url,image_url}]（保留顺序、去重）。"""
+def _xhs_video_url(note):
+    """视频笔记的视频流地址；同样按 h264/无水印优先。"""
     if not isinstance(note, dict):
-        return []
-    # 视频笔记有单独的 video 字段，交给 yt-dlp（实况只存在于图文笔记里）
+        return ""
+    video = _xhs_unwrap(note.get("video"))
+    if not isinstance(video, dict):
+        return ""
+    stream = _xhs_unwrap((video.get("media") or {}).get("stream")
+                         or video.get("stream"))
+    url = _xhs_stream_url(stream)
+    if url:
+        return url
+    # 少数版本只在 consumer.originVideoKey 里给原始视频
+    key = (video.get("consumer") or {}).get("originVideoKey")
+    if isinstance(key, str) and key.strip():
+        return "https://sns-video-bd.xhscdn.com/" + key.strip().lstrip("/")
+    return ""
+
+
+def _xhs_is_video_note(note):
+    """判断是不是视频笔记（type=video 或有可用的 video 流）。"""
+    if not isinstance(note, dict):
+        return False
     if str(note.get("type") or "").lower() == "video":
+        return True
+    return bool(_xhs_video_url(note))
+
+
+def _xhs_note_items(note):
+    """把 note 转成 [{kind,url,image_url,live}]（保留顺序、去重）。"""
+    if not isinstance(note, dict):
         return []
     image_list = note.get("imageList") or note.get("image_list") or []
     if not isinstance(image_list, list):
-        return []
+        image_list = []
+
+    # 视频笔记：直接取 note.video 的流，别把封面缩略图当正文存
+    if _xhs_is_video_note(note):
+        video_url = _xhs_video_url(note)
+        if not video_url:
+            return []
+        item = {"kind": "video", "url": video_url, "live": False, "video": True}
+        if image_list:
+            cover_img = _xhs_unwrap(image_list[0])
+            cover = _xhs_image_url(cover_img) if isinstance(cover_img, dict) else ""
+            if cover:
+                item["image_url"] = cover
+        return [item]
+
     items, seen = [], set()
     for img in image_list:
+        if not isinstance(img, dict):
+            continue
+        img = _xhs_unwrap(img)
         if not isinstance(img, dict):
             continue
         image_url = _xhs_image_url(img)
@@ -2390,7 +2468,7 @@ def _xhs_note_items(note):
         if not key or key in seen:
             continue
         seen.add(key)
-        item = {"kind": kind, "url": media_url}
+        item = {"kind": kind, "url": media_url, "live": kind == "video"}
         if image_url:
             item["image_url"] = image_url
         items.append(item)
@@ -2398,19 +2476,25 @@ def _xhs_note_items(note):
 
 
 def _xhs_build_note(note, note_id=""):
-    """只有含实况动图的笔记才返回 {"id","title","items"}，否则返回 None。"""
+    """图文/视频笔记返回 {"id","title","items"}；没有可下载内容时返回 None。
+
+    图文和视频都自己存，而不是交给 yt-dlp：yt-dlp 的 thumbnails 会把同一张图的
+    urlDefault/urlPre 两档都列出来，容易存成一大一小两张（小图很糊）。
+    """
     items = _xhs_note_items(note)
-    if not any(it["kind"] == "video" for it in items):
-        return None     # 普通图文：继续走 yt-dlp，避免重复下载
+    if not items:
+        return None
+    video_only = bool(items[0].get("video"))
     title = (note.get("title") or "").strip()
     if not title:
         title = re.sub(r"\s+", " ", note.get("desc") or "").strip()[:80]
     return {"id": note_id or str(note.get("noteId") or ""),
-            "title": title or "小红书图文", "items": items}
+            "title": title or ("小红书视频" if video_only else "小红书图文"),
+            "items": items, "video_only": video_only}
 
 
 def _xhs_parse_note(html, url=""):
-    """解析小红书页面。返回 {"title", "items"}；没有实况动图时返回 None。"""
+    """解析小红书页面。图文/视频笔记返回 {"title","items"}；失败返回 None。"""
     note = _xhs_state_note(html, url)
     return _xhs_build_note(note, _xhs_note_id(url)) if note else None
 
@@ -2497,7 +2581,7 @@ LOGIN_WALL_MARKERS = ("当前笔记暂时无法浏览", "登录后查看", "你�
 
 
 def xhs_fetch_note(url, cookies, job_dir, job=None):
-    """读取小红书笔记；有实况动图才返回解析结果，否则返回 None 交给 yt-dlp。"""
+    """读取小红书笔记；拿到图文/视频/实况数据就返回，失败返回 None 交给 yt-dlp。"""
     try:
         cookies = cookies_with_visitor("xiaohongshu.com", cookies, job_dir, job)
     except Exception:  # noqa
@@ -2533,12 +2617,22 @@ def xhs_fetch_note(url, cookies, job_dir, job=None):
             note = _xhs_build_note(
                 note_obj, _xhs_note_id(final) or _xhs_note_id(url))
             if note:
+                if note.get("video_only"):
+                    _job_note(job, "小红书：检测到视频笔记，直接保存视频")
+                    return note
                 live_n = sum(1 for it in note["items"] if it["kind"] == "video")
-                _job_note(job, f"小红书：检测到 {live_n} 个实况动图，"
-                               f"整篇直接保存（共 {len(note['items'])} 项）")
+                static_n = len(note["items"]) - live_n
+                if live_n:
+                    _job_note(job, f"小红书：检测到 {static_n} 张图片、"
+                                   f"{live_n} 个实况动图，整篇直接保存")
+                else:
+                    _job_note(job, f"小红书：检测到 {static_n} 张图片，直接保存原图")
                 return note
-            # 页面已经读到了，只是没有实况动图：不必再换入口重试
-            _job_note(job, "小红书：这篇笔记没有实况动图，普通图文/视频交给 yt-dlp")
+            # 页面已经读到了：视频笔记/空笔记才交给 yt-dlp，不必再换入口重试
+            if _xhs_is_video_note(note_obj):
+                _job_note(job, "小红书：这是视频笔记，交给 yt-dlp")
+            else:
+                _job_note(job, "小红书：笔记里没有可保存的图片，交给 yt-dlp")
             return None
 
         low = html.lower()
@@ -2634,27 +2728,38 @@ def run_job(job_id):
             return
     else:
         handled = False
-        # 小红书：带实况动图的笔记 yt-dlp 只会给封面静图，这里直接读页面的
-        # imageList（静图 + livePhoto 视频流）。普通图文/视频仍交给 yt-dlp。
+        # 小红书：图文/视频/实况都从 __INITIAL_STATE__ 直接取，避免 yt-dlp 把
+        # 封面缩略图的 urlDefault/urlPre 两档当成两张图（一大一小）存下来。
         if XHS_HOST_RE.match(job["url"]):
             try:
                 note = xhs_fetch_note(job["url"], cookies, job_dir, job)
             except Exception as e:  # noqa
                 note = None
                 _job_note(job, f"小红书：直接解析出错，改用 yt-dlp（{e}）")
+            if note and note.get("video_only") and job.get("quality") == "audio":
+                # 视频笔记选仅音频时让 yt-dlp 处理，它能把音轨单独抽出来
+                _job_note(job, "小红书：这是视频笔记，选「仅音频」时交给 yt-dlp 提取音轨")
+                note = None
             if note:
                 try:
                     saved = xhs_download_note(job, job_dir, note, cookies)
                 except XhsError as e:
-                    _job_note(job, f"小红书：实况动图下载失败，改用 yt-dlp（{e}）")
+                    _job_note(job, f"小红书：视频/动图下载失败，改用 yt-dlp（{e}）")
                 except Exception as e:  # noqa
                     _job_note(job, f"小红书：下载出错，改用 yt-dlp（{e}）")
                 else:
-                    live_n = sum(1 for it in note["items"] if it["kind"] == "video")
-                    _job_note(job, f"小红书：已保存 {len(saved)} 项"
-                                   + (f"（含 {live_n} 个实况动图）" if live_n else ""))
+                    live_n = sum(1 for it in note["items"]
+                                 if it["kind"] == "video" and not it.get("video"))
+                    static_n = len(note["items"]) - live_n
+                    if note.get("video_only"):
+                        _job_note(job, f"小红书：已保存视频 {os.path.basename(saved[0])}")
+                    elif live_n:
+                        _job_note(job, f"小红书：已保存 {len(saved)} 项"
+                                       f"（{static_n} 张图片 + {live_n} 个实况动图）")
+                    else:
+                        _job_note(job, f"小红书：已保存 {len(saved)} 张图片")
                     if job.get("quality") == "audio":
-                        _job_note(job, "这是图文笔记（含实况动图），没有可单独提取的音频，已保存全部内容")
+                        _job_note(job, "这是图文笔记，没有可单独提取的音频，已保存全部内容")
                     handled = True
         direct_done = False
         # 直链图片：不走 yt-dlp，省一次解析，也避免 "Unsupported URL"
