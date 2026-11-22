@@ -259,8 +259,9 @@
   .modal.open{display:grid;animation:fade .18s ease}
   @keyframes fade{from{opacity:0}to{opacity:1}}
   .modal .inner{
-    max-width:900px;width:100%;min-width:0;background:#fff;border-radius:22px;
-    padding:14px;box-shadow:var(--shadow-lg);
+    max-width:900px;width:100%;min-width:0;max-height:100%;overflow:auto;
+    overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+    background:#fff;border-radius:22px;padding:14px;box-shadow:var(--shadow-lg);
   }
   .modal .mhead{display:flex;align-items:center;gap:12px;padding:2px 4px 12px}
   .modal .mhead .t{
@@ -276,21 +277,24 @@
   .modal .close:hover{background:#e9ecf5;color:var(--text)}
   /* 关键：不能同时写 width:100% + max-height，否则竖屏视频会被拉变形。
      让宽度/高度都由视频本身比例决定，再限制在可视区域内。 */
-  .modal video{
+  .modal #mVideo{
     display:block;margin:0 auto;background:#0d1119;border-radius:14px;
     width:auto;height:auto;max-width:100%;max-height:min(78vh, 78dvh);
     object-fit:contain;
   }
-  .modal img{
+  .modal #mImg{
     display:block;margin:0 auto;background:#0d1119;border-radius:14px;
     width:auto;height:auto;max-width:100%;max-height:min(78vh, 78dvh);
     object-fit:contain;
   }
   .modal .mhead .mdownload{display:grid;place-items:center;flex:none}
   .mnav{
-    display:none;align-items:center;justify-content:center;gap:16px;
-    padding-top:12px;color:var(--muted);font-size:13px;font-weight:600;
+    display:none;align-items:center;justify-content:center;gap:16px;row-gap:8px;
+    flex-wrap:wrap;padding-top:12px;color:var(--muted);font-size:13px;font-weight:600;
   }
+  /* 多图时给缩略图条留出高度，避免大图 + 缩略图把弹层撑出屏幕 */
+  .modal .inner.has-thumbs #mImg,
+  .modal .inner.has-thumbs #mVideo{max-height:min(62vh, 62dvh)}
   .mnav button{
     width:40px;height:40px;border-radius:50%;border:1px solid var(--line);
     background:#f6f8ff;color:var(--text-2);font-size:22px;line-height:1;
@@ -299,6 +303,33 @@
   .mnav button:hover{background:var(--accent);border-color:var(--accent);color:#fff}
   .mnav button[disabled]{opacity:.35;cursor:not-allowed;background:#f2f4fa;color:var(--muted-2)}
   .mnav .mcount{min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
+  .mnav .mall{
+    display:none;align-items:center;gap:6px;height:34px;padding:0 14px;
+    border-radius:10px;background:var(--accent);color:#fff;font-size:12.5px;
+    font-weight:600;text-decoration:none;transition:.15s;
+  }
+  .mnav .mall:hover{background:#3f5ee8;color:#fff}
+  .mnav .mall svg{width:15px;height:15px}
+  /* 多图缩略图条：点哪张就看哪张，右上角保存按钮保存当前这张 */
+  .mthumbs{
+    display:none;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;
+    padding:10px 2px 2px;margin-top:2px;scrollbar-width:thin;
+    -webkit-overflow-scrolling:touch;
+  }
+  .mthumbs button{
+    position:relative;flex:none;width:64px;height:64px;padding:0;border-radius:10px;
+    border:2px solid transparent;background:#f2f4fa;overflow:hidden;cursor:pointer;transition:.15s;
+  }
+  .mthumbs button:hover{border-color:#c3cdfd}
+  .mthumbs button.on{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,110,247,.14)}
+  .mthumbs img,.mthumbs video{display:block;width:100%;height:100%;object-fit:cover}
+  .mthumbs video{background:#0d1119}
+  .mthumbs .vtag{
+    position:absolute;right:4px;bottom:4px;width:17px;height:17px;border-radius:50%;
+    background:rgba(13,17,25,.72);color:#fff;display:grid;place-items:center;
+    pointer-events:none;
+  }
+  .mthumbs .vtag svg{width:9px;height:9px;fill:currentColor}
 
   /* ---------- toast ---------- */
   .toast{
@@ -348,7 +379,12 @@
     .ico-btn{width:44px;height:44px;border-radius:13px}   /* 触控目标 ≥44px */
     .modal{padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
     .modal .inner{padding:10px;border-radius:18px}
-    .modal video{border-radius:12px}
+    .modal #mVideo{border-radius:12px}
+    .modal .inner.has-thumbs #mImg,
+    .modal .inner.has-thumbs #mVideo{max-height:min(52vh, 52dvh)}
+    .mnav{gap:10px}
+    .mnav .mall{height:32px;padding:0 12px;font-size:12px}
+    .mthumbs button{width:56px;height:56px}
     .toast{font-size:13px;padding:11px 18px}
   }
   /* 窄屏：操作按钮换到第二行，标题不再被挤压 */
@@ -431,10 +467,12 @@
     </div>
     <video id="mVideo" controls playsinline webkit-playsinline x5-playsinline preload="metadata"></video>
     <img id="mImg" alt="" style="display:none"/>
+    <div class="mthumbs" id="mThumbs" aria-label="图片列表"></div>
     <div class="mnav" id="mNav">
       <button id="mPrev" aria-label="上一张">‹</button>
       <span class="mcount" id="mCount"></span>
       <button id="mNext" aria-label="下一张">›</button>
+      <a class="mall" id="mDownloadAll" title="全选下载全部（zip）" style="display:none"></a>
     </div>
   </div>
 </div>
@@ -585,19 +623,24 @@ function updateCard(card, job){
   const files = job.files || [];
   const file = files[0] || null;
   const imgs = files.filter(f=>isImage(f.name));
+  const live = files.filter(f=>f.live);          // 实况动图（mp4）
+  const media = files.filter(f=>isImage(f.name) || f.live);  // 静图 + 动图
   const archive = job.archive || null;
 
   // 缩略图只在文件真正变化时重建：轮询不会让 <video> 反复加载
-  const thumbSig = job.status + "|" + (file ? file.rel : "") + "|" + (job.thumb||"") + "|" + imgs.length;
+  const thumbSig = job.status + "|" + (file ? file.rel : "") + "|" + (job.thumb||"") + "|" + media.length + "|" + live.length + "|" + (archive||"");
   if(r.thumbSig !== thumbSig){
     r.thumbSig = thumbSig;
     r.thumb.onclick = null;
     r.thumb.style.cursor = "";
-    if(job.status==="done" && imgs.length){
-      // 图文任务：第一张图就是缩略图，点开看大图/逐张保存
-      r.thumb.innerHTML = `<img src="${fileUrl(job.thumb || imgs[0].rel)}" alt="">`;
+    if(job.status==="done" && media.length){
+      // 图文任务：点缩略图看大图/动图，逐项保存
+      const first = media[0];
+      r.thumb.innerHTML = (isVideo(first.name) && !job.thumb)
+        ? `<video src="${fileUrl(first.rel)}#t=0.1" muted preload="metadata" playsinline webkit-playsinline></video>`
+        : `<img src="${fileUrl(job.thumb || first.rel)}" alt="">`;
       r.thumb.style.cursor = "pointer";
-      r.thumb.onclick = ()=>openGallery(job.filename || imgs[0].name, imgs, 0);
+      r.thumb.onclick = ()=>openGallery(job.filename || first.name, media, 0, archive);
     }else if(job.status==="done" && file && isVideo(file.name)){
       // 服务器用 ffmpeg 抽好的一帧；<video> 当缩略图在 iOS 上只会是黑块
       r.thumb.innerHTML = job.thumb
@@ -631,9 +674,17 @@ function updateCard(card, job){
     info = job.phase==="converting" ? "转码中…" : (job.phase==="merging" ? "合并中…" : `${Math.round(job.progress||0)}%`);
   }else if(job.status==="queued"){
     info = "等待开始";
-  }else if(job.status==="done" && imgs.length){
-    const total = imgs.reduce((n,f)=>n+(f.size||0), 0);
-    info = (imgs.length > 1 ? imgs.length + " 张 · " : "") + humanSize(total);
+  }else if(job.status==="done" && media.length){
+    const total = media.reduce((n,f)=>n+(f.size||0), 0);
+    let label = "";
+    if(media.length > 1){
+      label = (live.length === media.length)
+        ? `${media.length} 个动图`
+        : `${media.length} 项` + (live.length ? `（含 ${live.length} 个动图）` : "");
+    }else if(live.length){
+      label = "动图";
+    }
+    info = (label ? label + " · " : "") + humanSize(total);
   }else if(job.status==="done" && file){
     info = humanSize(file.size);
   }
@@ -671,33 +722,34 @@ function updateCard(card, job){
   }
 
   // 操作按钮只在状态/文件变化时重建，避免每次轮询重绑事件
-  const actionsSig = job.status + "|" + (file ? file.rel : "") + "|" + imgs.length + "|" + (archive||"");
+  const actionsSig = job.status + "|" + (file ? file.rel : "") + "|" + media.length + "|" + live.length + "|" + (archive||"");
   if(r.actionsSig !== actionsSig){
     r.actionsSig = actionsSig;
     r.actions.innerHTML = "";
     if(job.status==="done" && file){
-      const videoFile = files.find(f=>isVideo(f.name)) || null;
+      const liveRels = new Set(live.map(f=>f.rel));
+      const videoFile = files.find(f=>isVideo(f.name) && !liveRels.has(f.rel)) || null;
       if(videoFile){
         const play = el("button","ico-btn play"); play.title="播放"; play.setAttribute("aria-label","播放");
         play.innerHTML = ICON.play;
         play.onclick = ()=>openPlayer(videoFile.name, fileUrl(videoFile.rel));
         r.actions.appendChild(play);
       }
-      if(imgs.length){
+      if(media.length){
         const gal = el("button","ico-btn play");
-        gal.title = imgs.length > 1 ? `查看全部 ${imgs.length} 张图片` : "查看图片";
+        gal.title = media.length > 1 ? `查看全部 ${media.length} 项` : (live.length ? "查看动图" : "查看图片");
         gal.setAttribute("aria-label", gal.title);
         gal.innerHTML = ICON.gallery;
-        gal.onclick = ()=>openGallery(job.filename || imgs[0].name, imgs, 0);
+        gal.onclick = ()=>openGallery(job.filename || media[0].name, media, 0, archive);
         r.actions.appendChild(gal);
       }
-      // 多图任务下载 zip（一次保存全部），单图/视频直接保存对应文件
+      // 多项任务下载 zip（一次保存全部），单项/视频直接保存对应文件
       const target = archive ? fileUrl(archive)+"?dl=1"
-        : fileUrl(videoFile ? videoFile.rel : (imgs.length ? imgs[0].rel : file.rel))+"?dl=1";
+        : fileUrl(videoFile ? videoFile.rel : (media.length ? media[0].rel : file.rel))+"?dl=1";
       const dl = el("a","ico-btn"); dl.title = archive ? "下载全部（zip）" : "下载";
       dl.setAttribute("aria-label", dl.title);
       dl.href = target;
-      if(!archive) dl.download = videoFile ? videoFile.name : (imgs.length ? imgs[0].name : file.name);
+      if(!archive) dl.download = videoFile ? videoFile.name : (media.length ? media[0].name : file.name);
       dl.innerHTML = ICON.dl;
       r.actions.appendChild(dl);
     }
@@ -790,54 +842,163 @@ async function deleteJob(id){
   refresh();
 }
 
-// 看图弹层：图文任务可以左右翻页、逐张保存
-let GAL = {files:[], i:0, name:""};
+// 看图弹层：多图任务显示缩略图条，点哪张看哪张；右上角保存当前这一张，
+// 底部"全选下载全部"一次保存 zip（后端已为多图任务打好包）。
+let GAL = {files:[], i:0, name:"", archive:null};
 
 function galMove(delta){
   if(GAL.files.length < 2) return;
   GAL.i = (GAL.i + delta + GAL.files.length) % GAL.files.length;
   showGallery();
 }
+function renderThumbs(){
+  const box = $("#mThumbs");
+  box.innerHTML = "";
+  if(GAL.files.length < 2){ box.style.display = "none"; return; }
+  box.style.display = "flex";
+  GAL.files.forEach((f, idx)=>{
+    const b = document.createElement("button");
+    b.type = "button";
+    b.title = `第 ${idx+1} ${f.live ? "个动图" : "张"}`;
+    b.setAttribute("aria-label", b.title);
+    if(isVideo(f.name)){
+      // 动图缩略图用视频首帧；右下角加播放角标，黑帧时也能看出是动图
+      const v = document.createElement("video");
+      v.src = fileUrl(f.rel) + "#t=0.1";
+      v.muted = true;
+      v.preload = "metadata";
+      v.playsInline = true;
+      v.setAttribute("playsinline", "");
+      v.setAttribute("webkit-playsinline", "");
+      b.appendChild(v);
+      const tag = document.createElement("span");
+      tag.className = "vtag";
+      tag.innerHTML = ICON.play;
+      b.appendChild(tag);
+    }else{
+      const im = document.createElement("img");
+      im.src = fileUrl(f.rel);
+      im.alt = "";
+      im.loading = "lazy";         // 图多时只加载可视附近的缩略图
+      im.decoding = "async";
+      b.appendChild(im);
+    }
+    b.onclick = ()=>{ GAL.i = idx; showGallery(); };
+    box.appendChild(b);
+  });
+}
 function showGallery(){
   const n = GAL.files.length, f = GAL.files[GAL.i];
   if(!f) return;
   $("#mTitle").textContent = GAL.name;
-  $("#mImg").src = fileUrl(f.rel);
-  $("#mCount").textContent = n > 1 ? `${GAL.i+1} / ${n}` : "";
+
+  const v = $("#mVideo"), img = $("#mImg");
+  if(isVideo(f.name)){
+    // 实况动图：静音循环播放；普通视频（混合任务）不循环
+    img.style.display = "none"; img.removeAttribute("src");
+    v.style.display = ""; v.loop = !!f.live; v.muted = true;
+    v.src = fileUrl(f.rel);
+    v.play().catch(()=>{});
+  }else{
+    v.pause(); v.removeAttribute("src"); v.load(); v.style.display = "none";
+    img.style.display = ""; img.src = fileUrl(f.rel);
+  }
+
+  // 选中态 + 把当前缩略图滚到中间
+  const thumbs = $("#mThumbs").children;
+  for(let i=0; i<thumbs.length; i++) thumbs[i].classList.toggle("on", i===GAL.i);
+  if(thumbs[GAL.i] && $("#mThumbs").style.display !== "none")
+    thumbs[GAL.i].scrollIntoView({block:"nearest", inline:"center"});
+
+  $("#mCount").textContent = n > 1
+    ? `${GAL.i+1} / ${n}` + (f.live ? " · 动图" : "")
+    : (f.live ? "动图" : "");
   $("#mPrev").disabled = n < 2;
   $("#mNext").disabled = n < 2;
+
   const dl = $("#mDownload");
   dl.style.display = "";
   dl.href = fileUrl(f.rel) + "?dl=1";
   dl.download = f.name;
+  dl.title = n > 1
+    ? `保存第 ${GAL.i+1} ${f.live ? "个动图" : "张"}`
+    : (f.live ? "保存这个动图" : "保存这张");
+  dl.setAttribute("aria-label", dl.title);
   dl.innerHTML = ICON.dl;
+
+  const all = $("#mDownloadAll");
+  if(n > 1){
+    all.style.display = "inline-flex";
+    all.innerHTML = ICON.dl + `<span>全选下载全部（${n}）</span>`;
+    if(GAL.archive){
+      all.href = fileUrl(GAL.archive) + "?dl=1";
+      all.removeAttribute("download");   // 让服务端 Content-Disposition 决定 zip 文件名
+    }else{
+      all.removeAttribute("href");       // 没有 zip 时逐张触发下载
+    }
+  }else{
+    all.style.display = "none";
+    all.removeAttribute("href");
+  }
 }
-function openGallery(name, files, start=0){
-  GAL = {files, i: Math.max(0, Math.min(start, files.length-1)), name: name || "图片"};
-  const v = $("#mVideo"); v.pause(); v.src = ""; v.style.display = "none";
+function downloadAllImages(){
+  const files = GAL.files.slice();
+  files.forEach((f, idx)=>{
+    setTimeout(()=>{
+      const a = document.createElement("a");
+      a.href = fileUrl(f.rel) + "?dl=1";
+      a.download = f.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }, idx * 350);
+  });
+  toast(`开始下载 ${files.length} 项`);
+}
+function openGallery(name, files, start=0, archive=null){
+  GAL = {files, i: Math.max(0, Math.min(start, files.length-1)), name: name || "图片",
+         archive: archive || null};
+  const v = $("#mVideo");
+  v.pause(); v.removeAttribute("src"); v.load();
+  v.loop = false; v.muted = false; v.style.display = "none";
   $("#mImg").style.display = "";
+  $(".modal .inner").classList.toggle("has-thumbs", files.length > 1);
   $("#mNav").style.display = files.length > 1 ? "flex" : "none";
-  showGallery();
+  renderThumbs();
   $("#modal").classList.add("open");
+  showGallery();
 }
 function openPlayer(title, src){
-  GAL = {files:[], i:0, name:""};
+  GAL = {files:[], i:0, name:"", archive:null};
   $("#mTitle").textContent = title;
   $("#mImg").style.display = "none"; $("#mImg").src = "";
+  $(".modal .inner").classList.remove("has-thumbs");
+  $("#mThumbs").style.display = "none"; $("#mThumbs").innerHTML = "";
   $("#mNav").style.display = "none";
   $("#mDownload").style.display = "none"; $("#mDownload").removeAttribute("href");
-  const v = $("#mVideo"); v.style.display = ""; v.src = src;
+  $("#mDownloadAll").style.display = "none"; $("#mDownloadAll").removeAttribute("href");
+  const v = $("#mVideo");
+  v.loop = false; v.muted = false; v.style.display = ""; v.src = src;
   $("#modal").classList.add("open");
   v.play().catch(()=>{});
 }
 function closeModal(){
   $("#modal").classList.remove("open");
-  const v = $("#mVideo"); v.pause(); v.src = "";
+  const v = $("#mVideo");
+  v.pause(); v.removeAttribute("src"); v.load(); v.loop = false; v.muted = false;
   $("#mImg").src = "";
-  GAL = {files:[], i:0, name:""};
+  $(".modal .inner").classList.remove("has-thumbs");
+  $("#mThumbs").innerHTML = "";
+  $("#mDownloadAll").style.display = "none"; $("#mDownloadAll").removeAttribute("href");
+  GAL = {files:[], i:0, name:"", archive:null};
 }
 $("#mPrev").onclick = ()=>galMove(-1);
 $("#mNext").onclick = ()=>galMove(1);
+$("#mDownloadAll").onclick = (e)=>{
+  if(GAL.archive) return;          // 有 zip：走链接默认下载
+  e.preventDefault();
+  downloadAllImages();             // 没有 zip：逐张触发下载
+};
 $("#mClose").onclick = closeModal;
 $("#modal").onclick = (e)=>{ if(e.target.id==="modal") closeModal(); };
 document.addEventListener("keydown", e=>{
